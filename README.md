@@ -1,5 +1,9 @@
 # KENSv3 (KAIST Educational Network System)
-
+---
+## Project Team Members
+* Ju Young Suk (KAIST SoC '19)
+* Kinam Kim (KAIST SoC '19)
+---
 KENS series have been used for programming assignment in CS341: Introduction to Computer Network in KAIST.
 First version of KENS (v1) had been developed by Network Computing Lab, 2005.
 This version had been used until 2013.

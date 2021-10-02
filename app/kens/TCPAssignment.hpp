@@ -16,6 +16,10 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 
+// Our Implementation
+#include <set>
+#include <map>
+
 namespace E {
 
 class TCPAssignment : public HostModule,
@@ -25,11 +29,36 @@ class TCPAssignment : public HostModule,
 private:
   virtual void timerCallback(std::any payload) final;
 
+  // Our Implementation
+  const static int MAX_PORT_NUM = 65536;
+	std::set<int> fd_set;
+	std::set<uint32_t> ip_set[MAX_PORT_NUM];
+	bool is_addr_any[MAX_PORT_NUM];
+	std::map<int, std::pair<uint32_t, unsigned short int>> fd_info;
+	std::map<int, std::pair<struct sockaddr, socklen_t>> fd_info_raw;
+
 public:
   TCPAssignment(Host &host);
   virtual void initialize();
   virtual void finalize();
   virtual ~TCPAssignment();
+
+  // Our Implementation
+  void syscall_socket(UUID syscallUUID, int pid, int domain, int protocol, int trash);
+	void syscall_close(UUID syscallUUID, int pid, int fd);
+	void syscall_bind(UUID syscallUUID, int pid,
+		int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+	void syscall_getsockname(UUID syscallUUID, int pid,
+		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+
+	// void syscall_accept(UUID syscallUUID, int pid,
+	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	// void syscall_connect(UUID syscallUUID, int pid,
+	// 	int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+	// void syscall_getpeername(UUID syscallUUID, int pid,
+	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	// void syscall_listen(UUID syscallUUID, int pid,
+	// 	int sockfd, int backlog);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

@@ -18,22 +18,62 @@
 
 namespace E {
 
-typedef struct _Socket
-{
-  //process information
-  int pid;
-  int fd;
+  const static int MAX_PORT_NUM = 65536;
 
-  //socket info
-  int type;
-  int protocol;
-  uint32_t ip;
-  int port;
+  const int ACK = 1 << 4;
+  const int RST = 1 << 2;
+  const int SYN = 1 << 1;
+  const int FIN = 1 << 0;
 
-  bool isBound;
-  sockaddr addr;
-  socklen_t addrlen;
-} Socket;
+  enum TCPState
+  {
+    ST_READY, 		/* Socket is ready. */
+    ST_BOUND,		/* Socket is bound. */
+    ST_LISTEN,		/* Connect ready. Only for server. */
+    ST_SYN_SENT,	/* 3-way handshake, client. */
+    ST_SYN_RCVD,	/* 3-way handshake, server. */
+    ST_ESTAB,		/* Connection established. */
+
+    ST_FIN_WAIT_1,	/* 4-way handshake, active close. */
+    ST_FIN_WAIT_2,
+    ST_TIME_WAIT,
+    ST_CLOSE_WAIT,	/* 4-way handshake, passive close. */
+    ST_LAST_ACK,
+
+    ST_CLOSING		/* Recieved FIN after sending FIN. */
+  };
+
+  typedef struct _Context
+	{
+		// sockaddr local_addr;
+		// sockaddr remote_addr;
+    in_addr_t local_ip;
+    in_port_t local_port;
+    in_addr_t remote_ip;
+    in_port_t remote_port;
+		uint32_t seq_num;
+		uint32_t ack_num;
+	} Context;
+
+  typedef struct _Socket
+  {
+    //process information
+    int pid;
+    int fd;
+
+    //socket info
+    int type;
+    int protocol;
+    uint32_t ip;
+    int port;
+
+    bool isBound;
+    sockaddr addr;
+    socklen_t addrlen;
+
+    // State
+    enum TCPState state;
+  } Socket;
 
 
 class TCPAssignment : public HostModule,
@@ -43,9 +83,28 @@ class TCPAssignment : public HostModule,
 private:
   virtual void timerCallback(std::any payload) final;
 
-  std::map<int, Socket *> sockets;
-	std::map<std::pair<uint32_t, int>, int> sockfd_by_ip_port;
+  // (pid, sockfd) -> Socket
+  std::map<std::pair<int, int>, Socket *> sockets;
+  // (ip, port) -> (pid, sockfd)
+	std::map<std::pair<uint32_t, int>, std::pair<int, int>> pid_sockfd_by_ip_port;
+  //(pid, sockfd) -> Context
+  std::map<std::pair<int, int>, Context *> contexts;
 
+  // typedef struct _Process
+  // {
+  //   // sockfd -> Socket
+  //   std::map<int, Socket *> sockets;
+  //   // (ip, port) -> sockfd
+  // 	std::map<std::pair<uint32_t, int>, int> sockfd_by_ip_port;
+  //   // sockfd -> Context
+  //   std::map<int, Context *> contexts;
+  //
+  //   bool isBlocked;
+  //
+  // } Process;
+  //
+  // // pid -> process
+  // std::map<int, Process *> processes;
 public:
   TCPAssignment(Host &host);
   virtual void initialize();
@@ -59,14 +118,14 @@ public:
 		int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 	void syscall_getsockname(UUID syscallUUID, int pid,
 		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-  // void syscall_accept(UUID syscallUUID, int pid,
-	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-	// void syscall_connect(UUID syscallUUID, int pid,
-	// 	int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+  void syscall_accept(UUID syscallUUID, int pid,
+		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	void syscall_connect(UUID syscallUUID, int pid,
+		int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 	// void syscall_getpeername(UUID syscallUUID, int pid,
 	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-	// void syscall_listen(UUID syscallUUID, int pid,
-	// 	int sockfd, int backlog);
+	void syscall_listen(UUID syscallUUID, int pid,
+		int sockfd, int backlog);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

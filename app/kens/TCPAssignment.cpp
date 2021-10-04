@@ -412,21 +412,19 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
     this->returnSystemCall(syscallUUID, -1);
   }
 
-  Socket *t = (Socket *)malloc(sizeof(Socket));
-
 	int fd = this->createFileDescriptor(pid);
 
   if (fd < 0)
     return;
 
-  t->pid = pid;
-  t->fd = fd;
-  t->type = type;
-  t->protocol = protocol;
-  t->isBound = false;
+  Socket s;
+  s.pid = pid;
+  s.fd = fd;
+  s.type = type;
+  s.protocol = protocol;
+  s.isBound = false;
 
-
-  sockets[{pid, fd}] = t;
+  sockets[{pid, fd}] = s;
 
 	this->returnSystemCall(syscallUUID, fd);
 }
@@ -442,17 +440,16 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
   if(iter != sockets.end())
   {
-    Socket *s = iter->second;
+    auto &s = iter->second;
 
     uint32_t ip;
     int port;
 
     // std::tie(ip, port) = it2->first;
-    ip = s->ip;
-    port = s->port;
+    ip = s.ip;
+    port = s.port;
     sockets.erase(iter);
     pid_sockfd_by_ip_port.erase(std::pair<uint32_t, int>(ip, port));
-    free(s);
     // TODO: Socket's context also has to be managed here
   }
 
@@ -484,24 +481,22 @@ https://linux.die.net/man/3/listen.
 void syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-  // auto &fd_info = proc_table[pid].fd_info;
-
-	auto sock_it = sockets.find({pid, sockfd})
-
-	if(sock_it == sockets.end() || sock_it->second->state != ST_BOUND)
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-
-  Socket *s = sock_it->second;
-
-	s->state = ST_LISTEN;
-
-  // TODO: Imeplement backlog
-  // s->queue = new PassiveQueue(backlog);
-
-  this->returnSystemCall(syscallUUID, 0);
+	// auto sock_it = sockets.find({pid, sockfd});
+  //
+	// if(sock_it == sockets.end() || sock_it->second.state != ST_BOUND)
+	// {
+	// 	this->returnSystemCall(syscallUUID, -1);
+	// 	return;
+	// }
+  //
+  // Socket s = sock_it->second;
+  //
+	// s.state = ST_LISTEN;
+  //
+  // // TODO: Imeplement backlog
+  // // s->queue = new PassiveQueue(backlog);
+  //
+  // this->returnSystemCall(syscallUUID, 0);
 }
 
 /*
@@ -514,41 +509,41 @@ https://linux.die.net/man/3/accept .
 void syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    auto sock_it = sockets.find({pid, sockfd})
-    if(sock_it == sockets.end()
-      || (sock_it->second.state != ST_LISTEN
-        && sock_it->second.state != ST_SYN_RCVD))
-    {
-      this->returnSystemCall(syscallUUID, -1);
-      return;
-    }
-
-    Socket *s = sock_it->second;
-
-    // TODO: Implement queue
-    // auto &accept_queue = s.queue->accept_queue;
-    // if(accept_queue.empty())
+    // auto sock_it = sockets.find({pid, sockfd})
+    // if(sock_it == sockets.end()
+    //   || (sock_it->second.state != ST_LISTEN
+    //     && sock_it->second.state != ST_SYN_RCVD))
     // {
-    //   //sock.blocked = true;
-    //   //sock.blockedUUID = syscallUUID;
-    //   PCBEntry::syscallParam param;
-    //   param.acceptParam = { sockfd, addr, addrlen };
-    //   pcb.blockSyscall(ACCEPT, syscallUUID, param);
+    //   this->returnSystemCall(syscallUUID, -1);
     //   return;
     // }
-
-    int connfd = this->createFileDescriptor(pid);
-    if (connfd != -1)
-    {
-      fd_info.insert({ connfd, TCPSocket(sock.domain) });
-      auto &sock_accept = fd_info[connfd];
-      sock_accept.state = ST_ESTAB;
-      sock_accept.context = accept_queue.front(); accept_queue.pop();
-      *addr = sock_accept.context.remote_addr;
-      *addrlen = sizeof(*addr);
-    }
-
-    this->returnSystemCall(syscallUUID, connfd);
+    //
+    // Socket s = sock_it->second;
+    //
+    // // TODO: Implement queue
+    // // auto &accept_queue = s.queue->accept_queue;
+    // // if(accept_queue.empty())
+    // // {
+    // //   //sock.blocked = true;
+    // //   //sock.blockedUUID = syscallUUID;
+    // //   PCBEntry::syscallParam param;
+    // //   param.acceptParam = { sockfd, addr, addrlen };
+    // //   pcb.blockSyscall(ACCEPT, syscallUUID, param);
+    // //   return;
+    // // }
+    //
+    // int connfd = this->createFileDescriptor(pid);
+    // if (connfd != -1)
+    // {
+    //   fd_info.insert({ connfd, TCPSocket(sock.domain) });
+    //   auto &sock_accept = fd_info[connfd];
+    //   sock_accept.state = ST_ESTAB;
+    //   sock_accept.context = accept_queue.front(); accept_queue.pop();
+    //   *addr = sock_accept.context.remote_addr;
+    //   *addrlen = sizeof(*addr);
+    // }
+    //
+    // this->returnSystemCall(syscallUUID, connfd);
 }
 
 /*
@@ -581,7 +576,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
   }
 
   // Error: socket is already bound to an address
-  if (iter->second->isBound){
+  if (iter->second.isBound){
     this->returnSystemCall(syscallUUID, -1);
   }
 
@@ -603,13 +598,13 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
     this->returnSystemCall(syscallUUID, -1);
 
 
-  Socket *s = iter->second;
+  auto &s = iter->second;
 
-  s->isBound = true;
-  s->ip = ip;
-  s->port = port;
-  s->addr = *addr;
-  s->addrlen = addrlen;
+  s.isBound = true;
+  s.ip = ip;
+  s.port = port;
+  s.addr = *addr;
+  s.addrlen = addrlen;
 
   pid_sockfd_by_ip_port[std::pair<uint32_t, int>(ip, port)] = {pid, sockfd};
 
@@ -637,16 +632,16 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 		return;
 	}
   // Error: Socket is not bound
-	if(!(iter->second->isBound))
+	if(!(iter->second.isBound))
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-  Socket *s = iter->second;
+  auto &s = iter->second;
 
-  *addr = s->addr;
-  *addrlen = s->addrlen;
+  *addr = s.addr;
+  *addrlen = s.addrlen;
 
 	this->returnSystemCall(syscallUUID, 0);
 }

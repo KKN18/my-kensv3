@@ -84,11 +84,11 @@ private:
   virtual void timerCallback(std::any payload) final;
 
   // (pid, sockfd) -> Socket
-  std::map<std::pair<int, int>, Socket *> sockets;
+  std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<uint32_t, int>, std::pair<int, int>> pid_sockfd_by_ip_port;
   //(pid, sockfd) -> Context
-  std::map<std::pair<int, int>, Context *> contexts;
+  std::map<std::pair<int, int>, Context> contexts;
 
   // typedef struct _Process
   // {

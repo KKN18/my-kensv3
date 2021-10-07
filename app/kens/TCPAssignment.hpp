@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+// Can I use stdlib.h?
+#include <stdlib.h>
 
 namespace E {
 
@@ -25,10 +27,11 @@ namespace E {
   const int SYN = 1 << 1;
   const int FIN = 1 << 0;
 
+
+
   enum TCPState
   {
     ST_READY, 		/* Socket is ready. */
-    ST_BOUND,		/* Socket is bound. */
     ST_LISTEN,		/* Connect ready. Only for server. */
     ST_SYN_SENT,	/* 3-way handshake, client. */
     ST_SYN_RCVD,	/* 3-way handshake, server. */
@@ -46,11 +49,12 @@ namespace E {
   typedef struct _Context
 	{
 		// sockaddr local_addr;
-		// sockaddr remote_addr;
     in_addr_t local_ip;
     in_port_t local_port;
+    sockaddr local_addr;
     in_addr_t remote_ip;
     in_port_t remote_port;
+    sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
 	} Context;
@@ -73,6 +77,14 @@ namespace E {
 
     // State
     enum TCPState state;
+
+    // For client
+    Context client_context;
+
+    // Queue for listening socket
+    std::queue<Packet *> *listen_queue;
+		std::queue<Context> *accept_queue;
+    int backlog;
   } Socket;
 
 
@@ -126,6 +138,9 @@ public:
 	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
+  std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
+
+  sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

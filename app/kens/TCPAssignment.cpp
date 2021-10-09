@@ -230,7 +230,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       {
         printf("  Server's state is ST_LISTEN\n");
       }
-      int current = ST_LISTEN;
+
 			if(flag & SYN)
 			{
 				new_flag = SYN | ACK;
@@ -241,14 +241,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
           new_seq_num, new_ack_num, local_ip, remote_ip);
 
         Context c;
-        c.local_ip = local_ip;
-        c.local_port = local_port;
+        c.local_ip = local_ip; c.local_port = local_port;
         // TODO: Remove duplicate elements
         c.local_addr = tie_addr(local_ip, local_port);
-        c.remote_ip = remote_ip;
-        c.remote_port = remote_port;
+        c.remote_ip = remote_ip; c.remote_port = remote_port;
         c.remote_addr = tie_addr(remote_ip, remote_port);
-        c.seq_num = ntohl(new_seq_num);
+        c.seq_num = ntohl(new_seq_num); c.ack_num = ntohl(new_ack_num);
         // TODO: ack num is not touched here?
 
         contexts[{pid, fd}] = c;
@@ -270,13 +268,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         printf("  Server's state is ST_SYN_RCVD\n");
       }
 
-      auto context_it = contexts.find({pid, fd});
-      if (context_it == contexts.end())
-      {
-        // TODO: Not sure
-        return;
-      }
-
       if(flag & SYN)
       {
         if (s.listen_queue->size()+1 < s.backlog){
@@ -288,29 +279,51 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
           printf("  Currently working on another socket... Put in Queue\n");
           printf("  Listen Queue Size: %d\n", sock.listen_queue->size());
         }
+
+        return;
         break;
       }
 
+      auto context_it = contexts.find({pid, fd});
+
+      if (context_it == contexts.end())
+      {
+        // TODO: Not sure
+        return;
+      }
+
       auto &c = context_it->second;
-			if( std::make_pair(c.local_ip, c.local_port) == std::make_pair(local_ip, local_port) &&
-				std::make_pair(c.remote_ip, c.remote_port) == std::make_pair(remote_ip, remote_port))
-			{
-				if(flag & ACK)
-				{
-          if(LOG)
-          {
-            printf("  Accepting this packet... change server state to ST_LISTEN.\n");
-          }
-          s.accept_queue->push(c);
-          s.state = ST_LISTEN;
-          if (!s.listen_queue->empty()){
-            Packet const& resend_packet = s.listen_queue->front();
-            Packet clone_packet = resend_packet;
-						sock.listen_queue->pop();
-						packetArrived("IPv4", std::move(clone_packet));
-          }
-				}
-			}
+      assert(c.local_ip == local_ip);
+      assert(c.remote_ip == remote_ip);
+      assert(c.local_port == local_port);
+      assert(c.remote_port == remote_port);
+	
+      if((flag & FIN) && (flag & ACK))
+      {
+        // 여기서 state 바꾸고 ack 보내야함
+        // context에서 지우기
+        return;
+      }
+
+      if(flag & ACK)
+      {
+        if(LOG)
+        {
+          printf("  Accepting this packet... change server state to ST_LISTEN.\n");
+        }
+
+        s.accept_queue->push(c);
+        s.state = ST_LISTEN;
+        if (!s.listen_queue->empty()){
+          Packet const& resend_packet = s.listen_queue->front();
+          Packet clone_packet = resend_packet;
+          s.listen_queue->pop();
+          packetArrived("IPv4", std::move(clone_packet));
+        }
+
+        return;
+      }
+	
 			break;
     }
 

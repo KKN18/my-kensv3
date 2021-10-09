@@ -763,6 +763,35 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 
 	this->returnSystemCall(syscallUUID, 0);
 }
+/*
+getpeername() returns the address of the peer connected to the
+socket sockfd, in the buffer pointed to by addr.  The addrlen
+argument should be initialized to indicate the amount of space
+pointed to by addr.  On return it contains the actual size of the
+name returned (in bytes).  The name is truncated if the buffer
+provided is too small.
+
+The returned address is truncated if the buffer provided is too
+small; in this case, addrlen will return a value greater than was
+supplied to the call.
+*/
+void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
+	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+	// auto &fd_info = proc_table[pid].fd_info;
+
+	// auto sock_it = fd_info.find(sockfd);
+	// if(sock_it == fd_info.end() || sock_it->second.state != ST_ESTAB)
+	// {
+	// 	this->returnSystemCall(syscallUUID, -1);
+	// 	return;
+	// }
+	// auto &sock = sock_it->second;
+
+	// *addr = sock.context.remote_addr;
+	// *addrlen = (socklen_t)sizeof(sock.context.remote_addr);
+	this->returnSystemCall(syscallUUID, 0);
+}
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::untie_addr(sockaddr addr)
 {

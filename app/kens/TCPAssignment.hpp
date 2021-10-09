@@ -82,7 +82,7 @@ namespace E {
     Context client_context;
 
     // Queue for listening socket
-    std::queue<Packet *> *listen_queue;
+    std::queue<Packet> *listen_queue;
 		std::queue<Context> *accept_queue;
     int backlog;
   } Socket;
@@ -138,9 +138,21 @@ public:
 	// 	int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
-  std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
 
-  sockaddr tie_addr(in_addr_t ip, in_port_t port);
+    // Utility Functions
+    std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
+
+    sockaddr tie_addr(in_addr_t ip, in_port_t port);
+
+    void write_packet_header(Packet *new_packet,
+      size_t ip_start, size_t tcp_start,
+      in_addr_t local_ip, in_addr_t remote_ip,
+      in_port_t local_port, in_port_t remote_port);
+
+    void write_packet_response(Packet *new_packet,
+      size_t ip_start, size_t tcp_start,
+      uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
+      in_addr_t local_ip, in_addr_t remote_ip);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

@@ -144,6 +144,13 @@ public:
 
     sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
+    void read_packet_header(Packet *packet,
+      size_t ip_start, size_t tcp_start,
+      in_addr_t *local_ip, in_addr_t *remote_ip,
+      in_port_t *local_port, in_port_t *remote_port,
+      uint32_t *seq_num, uint32_t *seq_num,
+      uint8_t *data_ofs_ns, uint8_t *flag);
+
     void write_packet_header(Packet *new_packet,
       size_t ip_start, size_t tcp_start,
       in_addr_t local_ip, in_addr_t remote_ip,

@@ -104,19 +104,37 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 	size_t tcp_start = ip_start + ihl;
 	uint32_t ip_buffer;
 	uint16_t port_buffer;
+  in_addr_t remote_ip, local_ip;
+  in_port_t remote_port, local_port;
+  uint32_t seq_num, ack_num;
+  uint8_t data_ofs_ns, flag;
 
-	packet.readData(ip_start + 12, &ip_buffer, 4);
-	packet.readData(tcp_start + 0, &port_buffer, 2);
-	in_addr_t remote_ip = (in_addr_t)ntohl(ip_buffer);
-	in_port_t remote_port = (in_port_t)ntohs(port_buffer);
-	// sockaddr remote_addr = tie_addr(remote_ip, remote_port);
+  // Replace reading packet using this function
+  read_packet_header(&packet, ip_start, tcp_start,
+    &local_ip, &remote_ip, &local_port, &remote_port,
+    &seq_num, &ack_num, &data_ofs_ns, &flag);
+	// packet.readData(ip_start + 12, &ip_buffer, 4);
+	// packet.readData(tcp_start + 0, &port_buffer, 2);
+	// remote_ip = (in_addr_t)ntohl(ip_buffer);
+	// remote_port = (in_port_t)ntohs(port_buffer);
+	// // sockaddr remote_addr = tie_addr(remote_ip, remote_port);
 
-	packet.readData(ip_start + 16, &ip_buffer, 4);
-	packet.readData(tcp_start + 2, &port_buffer, 2);
-	in_addr_t local_ip = (in_addr_t)ntohl(ip_buffer);
-	in_port_t local_port = (in_port_t)ntohs(port_buffer);
-	// sockaddr local_addr = tie_addr(local_ip, local_port);
+	// packet.readData(ip_start + 16, &ip_buffer, 4);
+	// packet.readData(tcp_start + 2, &port_buffer, 2);
+	// local_ip = (in_addr_t)ntohl(ip_buffer);
+	// local_port = (in_port_t)ntohs(port_buffer);
+
+	// packet.readData(tcp_start + 4, &seq_num, 4);
+	// seq_num = ntohl(seq_num);
+	
+	// packet.readData(tcp_start + 8, &ack_num, 4);
+	// ack_num = ntohl(ack_num);
+	
+	// packet.readData(tcp_start + 12, &data_ofs_ns, 1);
+	size_t data_ofs = (data_ofs_ns >> 4) * 4;
+
   /* Read Packet FINISH */
+
   if(LOG) {
     char local_ip_buffer[20];
     char remote_ip_buffer[20];
@@ -130,6 +148,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     printf("  remote_port: %d\n", remote_port);
   }
 
+  /* For Debugging */
   auto test_iter = pid_sockfd_by_ip_port.begin();
   if(LOG) {
     printf("  <Start iterating>\n");
@@ -165,32 +184,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   if(iter2 == sockets.end()){
     // Error: Socket not found
     // Not sure
-    // this->freePacket(packet);
     return;
   }
 
-  auto &s = iter2 ->second;
-  pid = s.pid;
+  auto &s = iter2->second;
 
-	// std::tie(pid, fd) = addr_sock_it->second;
-	// auto &pcb = proc_table[pid];
-	// auto &sock = pcb.fd_info[fd];
+  assert(pid == s.pid);
 
-  /* Read Packet START AGAIN */
-	uint32_t seq_num;
-	packet.readData(tcp_start + 4, &seq_num, 4);
-	seq_num = ntohl(seq_num);
-	uint32_t ack_num;
-	packet.readData(tcp_start + 8, &ack_num, 4);
-	ack_num = ntohl(ack_num);
-
-	uint8_t data_ofs_ns;
-	packet.readData(tcp_start + 12, &data_ofs_ns, 1);
-	size_t data_ofs = (data_ofs_ns >> 4) * 4;
-
-	uint8_t flag;
-	packet.readData(tcp_start + 13, &flag, 1);
-  /* Read Packet FINISH */
   if(LOG)
   {
     printf("  seq_num: %d\n", seq_num);
@@ -211,8 +211,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 	uint8_t tcp_header_buffer[20];
 	uint16_t checksum;
 	uint8_t new_flag;
-	uint32_t new_seq_num;
-	uint32_t new_ack_num;
+	uint32_t new_seq_num, new_ack_num;
   /* Write Packet FINISH */
   if(LOG)
     printf("\n  ======== SERVER ======== \n");
@@ -261,59 +260,17 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 			break;
     }
 
-		case ST_SYN_SENT:	{/* 3-way handshake, client. */
-        if(LOG)
-        {
-          printf("  Server's state is ST_SYN_SENT\n");
-        }
-        int current = ST_SYN_SENT;
-  			if((flag & SYN) && (flag & ACK))
-  			{
-          auto context_it = contexts.find({pid, fd});
-          if (context_it == contexts.end())
-          {
-  					// this->returnSystemCall(pcb.syscallUUID, -1);
-  					s.state = ST_READY;
-  					break;
-          }
-  				if(ack_num != context_it->second.seq_num + 1)
-  				{
-  					// this->returnSystemCall(pcb.syscallUUID, -1);
-  					s.state = ST_READY;
-  					break;
-  				}
-
-  				new_flag = ACK;
-  				new_packet.writeData(tcp_start + 13, &new_flag, 1);
-
-  				new_ack_num = htonl(seq_num + 1);
-  				new_packet.writeData(tcp_start + 8, &new_ack_num, 4);
-
-  				new_packet.readData(tcp_start, tcp_header_buffer, 20);
-  				checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-  				checksum = ~checksum;
-  				checksum = htons(checksum);
-  				new_packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-
-  				sendPacket("IPv4", std::move(new_packet));
-
-  				s.state = ST_ESTAB;
-
-  				// this->returnSystemCall(pcb.syscallUUID, 0);
-			}
-			else if(flag & SYN)
-				//assert(0);  // Simultaneous open not considered
-			break;
-    }
+    /* 3-way handshake, client. */
+		case ST_SYN_SENT:	
+      break;
 
 		case ST_SYN_RCVD: {	/* 3-way handshake, server. */
-      // TODO
       if(LOG)
       {
         printf("  Server's state is ST_SYN_RCVD\n");
       }
+
       auto context_it = contexts.find({pid, fd});
-      int current = ST_SYN_RCVD;
       if (context_it == contexts.end())
       {
         // TODO: Not sure
@@ -322,18 +279,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
       if(flag & SYN)
       {
+        if (s.listen_queue->size()+1 < s.backlog){
+          Packet clone_packet = packet;
+          s.listen_queue->push(clone_packet);
+        }
         if(LOG)
         {
           printf("  Currently working on another socket... Put in Queue\n");
-        }
-        auto &sock = sockets[{pid, fd}];
-        if (sock.listen_queue->size()+1 < sock.backlog){
-          Packet clone_packet = packet;
-          sock.listen_queue->push(clone_packet);
-        }
-        if(LOG)
-        {
-          printf("  Listen Quue Size: %d\n", sock.listen_queue->size());
+          printf("  Listen Queue Size: %d\n", sock.listen_queue->size());
         }
         break;
       }
@@ -348,11 +301,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
           {
             printf("  Accepting this packet... change server state to ST_LISTEN.\n");
           }
-          auto &sock = sockets[{pid, fd}];
-          sock.accept_queue->push(c);
-          sock.state = ST_LISTEN;
-          if (!sock.listen_queue->empty()){
-            Packet const& resend_packet = sock.listen_queue->front();
+          s.accept_queue->push(c);
+          s.state = ST_LISTEN;
+          if (!s.listen_queue->empty()){
+            Packet const& resend_packet = s.listen_queue->front();
             Packet clone_packet = resend_packet;
 						sock.listen_queue->pop();
 						packetArrived("IPv4", std::move(clone_packet));
@@ -361,20 +313,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 			}
 			break;
     }
-
-		case ST_ESTAB:		/* Connection established. */
-			//assert(0);  // Read/Write not implemented!
-			break;
-
-		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
-		case ST_FIN_WAIT_2:
-
-		case ST_TIME_WAIT:
-		case ST_CLOSE_WAIT:	/* 4-way handshake, passive close. */
-		case ST_LAST_ACK:
-
-		case ST_CLOSING:	/* Recieved FIN after sending FIN. */
-			break;
 
 		default:
 			assert(0);
@@ -454,126 +392,6 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
 	this->removeFileDescriptor(pid, fd);
 	this->returnSystemCall(syscallUUID, 0);
-}
-
-/*
-The connect() call receives 3 parameters from the application layer. It connects the file
-descriptor to the address specified by addr. More details about the socket call are described
-https://linux.die.net/man/2/connect and https://linux.die.net/man/3/connect.
-
-*/
-void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
-	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-{
-  if(LOG) {
-    printf("(pid: %d) syscall_bind\n", pid);
-  }
-  auto iter = sockets.find({pid, sockfd});
-  if(iter == sockets.end()) {
-    this->returnSystemCall(syscallUUID, -1);
-  }
-
-  auto &s = iter->second;
-
-  in_addr_t remote_ip;
-  in_port_t remote_port;
-
-  remote_ip = ntohl(((sockaddr_in *)&addr)->sin_addr.s_addr);
-  remote_port = ntohs(((sockaddr_in *)&addr)->sin_port);
-
-  s.client_context.remote_addr = *addr;
-
-  if(s.state != ST_READY) {
-    // Error
-    return;
-  }
-
-  char remote_ip_buffer[20];
-  inet_ntop(AF_INET, &remote_ip, remote_ip_buffer, sizeof(remote_ip_buffer));
-
-  char *token = strtok(remote_ip_buffer, ".");
-  ipv4_t converted_remote_ip;
-
-  int idx = 0;
-
-  while (token != NULL) {
-      // printf("%s\n", token);
-      converted_remote_ip[idx++] = atoi(token);
-      token = strtok(NULL, ".");
-  }
-
-	int table_port = getRoutingTable(converted_remote_ip);
-  std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
-  char local_ip_buffer[20];
-
-  for (int i=0; i<4; i++) {
-    std::string buf = std::to_string((*local_ip_array)[i] - '0');
-    strcat(local_ip_buffer, buf.c_str());
-    if(i != 3)
-      strcat(local_ip_buffer, ".");
-  }
-
-  in_addr_t local_ip;
-	in_port_t local_port;
-
-  inet_pton(AF_INET, local_ip_buffer, &local_ip);
-
-  /* Find port that is not taken yet */
-	while (true)
-	{
-		local_port = rand() % 65536;
-    if (pid_sockfd_by_ip_port.find({local_ip, local_port}) == pid_sockfd_by_ip_port.end()
-          && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
-			break;
-	}
-
-  pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
-
-  s.ip = local_ip;
-  s.port = local_port;
-  s.isBound = true;
-  s.addr = tie_addr(local_ip, local_port);
-  // Not Sure
-  s.addrlen = sizeof(struct sockaddr_in);
-
-  size_t ip_start = 14;
-  size_t tcp_start = 34;
-  size_t data_ofs = 20;
-
-  Packet packet(tcp_start + data_ofs);
-
-  uint32_t ip_buffer = htonl(local_ip);
-  packet.writeData(ip_start + 12, &ip_buffer, 4);
-  ip_buffer = htonl(remote_ip);
-  packet.writeData(ip_start + 16, &ip_buffer, 4);
-
-  uint16_t port_buffer = htons(local_port);
-  packet.writeData(tcp_start + 0, &port_buffer, 2);
-  port_buffer = htons(remote_port);
-  packet.writeData(tcp_start + 2, &port_buffer, 2);
-
-  uint8_t new_data_ofs_ns = 5 << 4;
-  uint16_t window_size = htons(51200);
-  packet.writeData(tcp_start + 12, &new_data_ofs_ns, 1);
-  packet.writeData(tcp_start + 14, &window_size, 2);
-
-  uint8_t flag = SYN;
-  packet.writeData(tcp_start + 13, &flag, 1);
-
-  uint32_t seq_num = htonl(rand());
-  packet.writeData(tcp_start + 4, &seq_num, 4);
-
-  uint8_t tcp_header_buffer[20];
-  packet.readData(tcp_start, tcp_header_buffer, 20);
-  uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-  checksum = ~checksum;
-  checksum = htons( checksum);
-  packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-
-  this->sendPacket("IPv4", std::move(packet));
-
-  s.state = ST_SYN_SENT;
-  s.client_context.seq_num = ntohl(seq_num);
 }
 
 /*
@@ -763,6 +581,126 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 
 	this->returnSystemCall(syscallUUID, 0);
 }
+
+/*
+The connect() call receives 3 parameters from the application layer. It connects the file
+descriptor to the address specified by addr. More details about the socket call are described
+https://linux.die.net/man/2/connect and https://linux.die.net/man/3/connect.
+*/
+void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
+	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
+{
+  if(LOG) {
+    printf("(pid: %d) syscall_bind\n", pid);
+  }
+  auto iter = sockets.find({pid, sockfd});
+  if(iter == sockets.end()) {
+    this->returnSystemCall(syscallUUID, -1);
+  }
+
+  auto &s = iter->second;
+
+  in_addr_t remote_ip;
+  in_port_t remote_port;
+
+  remote_ip = ntohl(((sockaddr_in *)&addr)->sin_addr.s_addr);
+  remote_port = ntohs(((sockaddr_in *)&addr)->sin_port);
+
+  s.client_context.remote_addr = *addr;
+
+  if(s.state != ST_READY) {
+    // Error
+    return;
+  }
+
+  char remote_ip_buffer[20];
+  inet_ntop(AF_INET, &remote_ip, remote_ip_buffer, sizeof(remote_ip_buffer));
+
+  char *token = strtok(remote_ip_buffer, ".");
+  ipv4_t converted_remote_ip;
+
+  int idx = 0;
+
+  while (token != NULL) {
+      // printf("%s\n", token);
+      converted_remote_ip[idx++] = atoi(token);
+      token = strtok(NULL, ".");
+  }
+
+	int table_port = getRoutingTable(converted_remote_ip);
+  std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
+  char local_ip_buffer[20];
+
+  for (int i=0; i<4; i++) {
+    std::string buf = std::to_string((*local_ip_array)[i] - '0');
+    strcat(local_ip_buffer, buf.c_str());
+    if(i != 3)
+      strcat(local_ip_buffer, ".");
+  }
+
+  in_addr_t local_ip;
+	in_port_t local_port;
+
+  inet_pton(AF_INET, local_ip_buffer, &local_ip);
+
+  /* Find port that is not taken yet */
+	while (true)
+	{
+		local_port = rand() % 65536;
+    if (pid_sockfd_by_ip_port.find({local_ip, local_port}) == pid_sockfd_by_ip_port.end()
+          && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
+			break;
+	}
+
+  pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
+
+  s.ip = local_ip;
+  s.port = local_port;
+  s.isBound = true;
+  s.addr = tie_addr(local_ip, local_port);
+  // Not Sure
+  s.addrlen = sizeof(struct sockaddr_in);
+
+  size_t ip_start = 14;
+  size_t tcp_start = 34;
+  size_t data_ofs = 20;
+
+  Packet packet(tcp_start + data_ofs);
+
+  uint32_t ip_buffer = htonl(local_ip);
+  packet.writeData(ip_start + 12, &ip_buffer, 4);
+  ip_buffer = htonl(remote_ip);
+  packet.writeData(ip_start + 16, &ip_buffer, 4);
+
+  uint16_t port_buffer = htons(local_port);
+  packet.writeData(tcp_start + 0, &port_buffer, 2);
+  port_buffer = htons(remote_port);
+  packet.writeData(tcp_start + 2, &port_buffer, 2);
+
+  uint8_t new_data_ofs_ns = 5 << 4;
+  uint16_t window_size = htons(51200);
+  packet.writeData(tcp_start + 12, &new_data_ofs_ns, 1);
+  packet.writeData(tcp_start + 14, &window_size, 2);
+
+  uint8_t flag = SYN;
+  packet.writeData(tcp_start + 13, &flag, 1);
+
+  uint32_t seq_num = htonl(rand());
+  packet.writeData(tcp_start + 4, &seq_num, 4);
+
+  uint8_t tcp_header_buffer[20];
+  packet.readData(tcp_start, tcp_header_buffer, 20);
+  uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
+  checksum = ~checksum;
+  checksum = htons( checksum);
+  packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+
+  this->sendPacket("IPv4", std::move(packet));
+
+  s.state = ST_SYN_SENT;
+  s.client_context.seq_num = ntohl(seq_num);
+}
+
 /*
 getpeername() returns the address of the peer connected to the
 socket sockfd, in the buffer pointed to by addr.  The addrlen
@@ -806,6 +744,45 @@ sockaddr TCPAssignment::tie_addr(in_addr_t ip, in_port_t port)
 	addr.sin_port = htons(port);
 	addr.sin_addr.s_addr = htonl(ip);
 	return *(sockaddr *)(&addr);
+}
+
+void TCPAssignment::read_packet_header(Packet *packet,
+  size_t ip_start, size_t tcp_start,
+  in_addr_t *local_ip, in_addr_t *remote_ip,
+  in_port_t *local_port, in_port_t *remote_port,
+  uint32_t *seq_num, uint32_t *seq_num,
+  uint8_t *data_ofs_ns, uint8_t *flag)
+{
+  uint32_t ip_buffer;
+	uint16_t port_buffer;
+  uint32_t seq_num_buffer;
+  uint32_t ack_num_buffer;
+  uint8_t data_ofs_ns_buffer;
+  uint8_t flag_buffer;
+
+  packet->readData(ip_start + 12, &ip_buffer, 4);
+	packet->readData(tcp_start + 0, &port_buffer, 2);
+  *remote_ip = (in_addr_t)ntohl(ip_buffer);
+  *remote_port = (in_port_t)ntohs(port_buffer);
+
+  packet->readData(ip_start + 16, &ip_buffer, 4);
+	packet->readData(tcp_start + 2, &port_buffer, 2);
+  *local_ip = (in_addr_t)ntohl(ip_buffer);
+  *local_port = (in_port_t)ntohs(port_buffer);
+
+  packet->readData(tcp_start + 4, &seq_num_buffer, 4);
+  *seq_num = ntohl(seq_num_buffer);
+
+	packet->readData(tcp_start + 8, &ack_num_buffer, 4);
+	*ack_num = ntohl(ack_num_buffer);
+
+	packet->readData(tcp_start + 12, &data_ofs_ns_buffer, 1);
+  *data_ofs_ns = data_ofs_ns_buffer;
+
+	packet->readData(tcp_start + 13, &flag_buffer, 1);
+  *flag = flag_buffer;
+
+  return;
 }
 
 void TCPAssignment::write_packet_header(Packet *new_packet,

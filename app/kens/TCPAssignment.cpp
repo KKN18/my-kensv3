@@ -74,9 +74,9 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     		static_cast<socklen_t*>(param.param3_ptr));
     break;
   case GETPEERNAME:
-    // this->syscall_getpeername(syscallUUID, pid, param.param1_int,
-    // 		static_cast<struct sockaddr *>(param.param2_ptr),
-    // 		static_cast<socklen_t*>(param.param3_ptr));
+    this->syscall_getpeername(syscallUUID, pid, param.param1_int,
+    		static_cast<struct sockaddr *>(param.param2_ptr),
+    		static_cast<socklen_t*>(param.param3_ptr));
     break;
   default:
     assert(0);
@@ -130,18 +130,26 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     printf("  remote_port: %d\n", remote_port);
   }
 
-  auto iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, int>(local_ip, local_port));
-  if(iter != pid_sockfd_by_ip_port.end())
-  {
-    	// this->freePacket(packet);
-    	return;
+  auto test_iter = pid_sockfd_by_ip_port.begin();
+  if(LOG) {
+    printf("  <Start iterating>\n");
+  }
+  for (test_iter; test_iter != pid_sockfd_by_ip_port.end(); test_iter++) {
+    if(LOG)
+    {
+      printf("   ip %d port %d\n", test_iter->first.first, test_iter->first.second);
+      printf("   pid %d sockfd %d\n", test_iter->second.first, test_iter->second.second);
+    }
   }
 
-  iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, int>(0, local_port));
-  if (iter != pid_sockfd_by_ip_port.end())
+  auto iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
+  if(iter == pid_sockfd_by_ip_port.end())
   {
-    // this->freePacket(packet);
-    return;
+      iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+      if (iter == pid_sockfd_by_ip_port.end())
+      {
+        return;
+      }
   }
 
   int pid, fd;

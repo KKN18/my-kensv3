@@ -84,9 +84,37 @@ namespace E {
     // Queue for listening socket
     std::queue<Packet> *listen_queue;
 		std::queue<Context> *accept_queue;
-    int backlog;
+    unsigned int backlog;
   } Socket;
 
+  typedef struct _CloseParam
+  {
+    int fd;
+    sockaddr *addr;
+    socklen_t *addrlen;
+  } CloseParam;
+
+  typedef struct _AcceptParam
+  {
+    int fd;
+    sockaddr *addr;
+    socklen_t *addrlen;
+  } AcceptParam;
+
+  typedef struct _ConnectParam
+  {
+    int fd;
+    sockaddr *addr;
+    socklen_t *addrlen;
+  } ConnectParam;
+
+  typedef struct _Process
+  {
+    bool isBlocked;
+    int syscall;
+		UUID syscallUUID;
+    AcceptParam accept_param;
+  } Process;
 
 class TCPAssignment : public HostModule,
                       private RoutingInfoInterface,
@@ -98,25 +126,12 @@ private:
   // (pid, sockfd) -> Socket
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
-	std::map<std::pair<uint32_t, int>, std::pair<int, int>> pid_sockfd_by_ip_port;
-  //(pid, sockfd) -> Context
+	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
+  // (pid, sockfd) -> Context
   std::map<std::pair<int, int>, Context> contexts;
+  // (pid) -> (Process)
+  std::map<int, Process> process_table;
 
-  // typedef struct _Process
-  // {
-  //   // sockfd -> Socket
-  //   std::map<int, Socket *> sockets;
-  //   // (ip, port) -> sockfd
-  // 	std::map<std::pair<uint32_t, int>, int> sockfd_by_ip_port;
-  //   // sockfd -> Context
-  //   std::map<int, Context *> contexts;
-  //
-  //   bool isBlocked;
-  //
-  // } Process;
-  //
-  // // pid -> process
-  // std::map<int, Process *> processes;
 public:
   TCPAssignment(Host &host);
   virtual void initialize();
@@ -148,7 +163,7 @@ public:
       size_t ip_start, size_t tcp_start,
       in_addr_t *local_ip, in_addr_t *remote_ip,
       in_port_t *local_port, in_port_t *remote_port,
-      uint32_t *seq_num, uint32_t *seq_num,
+      uint32_t *seq_num, uint32_t *ack_num,
       uint8_t *data_ofs_ns, uint8_t *flag);
 
     void write_packet_header(Packet *new_packet,

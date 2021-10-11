@@ -35,13 +35,6 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     printf("(pid: %d) systemCallback\n", pid);
   }
 
-  // Process p;
-  // p.isBlocked = false;
-  // p.syscall = param.syscallNumber;
-  // p.syscallUUID = syscallUUID;
-  // // p.syscall_param
-  // process_list[pid] = p;
-
   switch (param.syscallNumber) {
   case SOCKET:
     this->syscall_socket(syscallUUID, pid, param.param1_int, param.param2_int, param.param3_int);
@@ -858,10 +851,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   size_t ip_start = 14;
   size_t tcp_start = 34;
   size_t data_ofs = 20;
-
-  if(LOG2)
-    printf("Here826\n");
-
+  
   Packet packet(tcp_start + data_ofs);
 
   /* Writing Packet */
@@ -900,9 +890,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
   sendPacket("IPv4", std::move(packet));
 
-  if(LOG2)
-    printf("Here867\n");
-
   s.state = ST_SYN_SENT;
   s.client_context.seq_num = ntohl(seq_num);
 
@@ -913,8 +900,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   p.syscall = CONNECT;
   process_table[pid] = p;
 
-  if(LOG2)
-    printf("Here880\n");
   return;
 }
 

@@ -114,6 +114,7 @@ namespace E {
     int syscall;
 		UUID syscallUUID;
     AcceptParam accept_param;
+    ConnectParam connect_param;
   } Process;
 
 class TCPAssignment : public HostModule,
@@ -129,7 +130,7 @@ private:
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
   // (pid, sockfd) -> Context
   std::map<std::pair<int, int>, Context> contexts;
-  // (pid) -> (Process)
+  // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> process_table;
 
 public:

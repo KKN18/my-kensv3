@@ -14,6 +14,7 @@
 #include <cerrno>
 
 #define LOG 0
+#define LOG2 0
 
 namespace E {
 
@@ -91,7 +92,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 }
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
-  if(LOG) {
+  if(LOG2) {
     printf("\npacketArrived=========================\n");
   }
   /* Read Packet START */
@@ -123,7 +124,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   /* Read Packet FINISH */
 
-  if(LOG) {
+  if(LOG2) {
     char local_ip_buffer[20];
     char remote_ip_buffer[20];
 
@@ -164,7 +165,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   fd = iter->second.second;
 
   auto iter2 = sockets.find({pid, fd});
-  if(LOG)
+  if(LOG2)
   {
     printf("   sockets.find({%d %d})\n", pid, fd);
   }
@@ -179,7 +180,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   assert(pid == s.pid);
 
-  if(LOG)
+  if(LOG2)
   {
     printf("  seq_num: %d\n", seq_num);
     printf("  ack_num: %d\n", ack_num);
@@ -198,6 +199,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
 	uint8_t new_flag;
 	uint32_t new_seq_num, new_ack_num;
+
+  uint8_t tcp_header_buffer[20];
+  uint16_t checksum;
   /* Write Packet FINISH */
 
   if(LOG)
@@ -246,8 +250,108 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     }
 
     /* 3-way handshake, client. */
-		case ST_SYN_SENT:
+		case ST_SYN_SENT: {
+      if(LOG2)
+        {
+          printf("  Client's state is ST_SYN_SENT\n");
+        }
+        int current = ST_SYN_SENT;
+  			if((flag & SYN) && (flag & ACK))
+  			{
+  				if(ack_num != s.client_context.seq_num + 1)
+  				{
+  					// this->returnSystemCall(pcb.syscallUUID, -1);
+  					s.state = ST_READY;
+  					break;
+  				}
+
+          if(LOG2)
+          {
+            printf("  Client's state is ST_SYN_SENT\n");
+          }
+
+  				new_flag = ACK;
+  				new_packet.writeData(tcp_start + 13, &new_flag, 1);
+
+  				new_ack_num = htonl(seq_num + 1);
+  				new_packet.writeData(tcp_start + 8, &new_ack_num, 4);
+
+  				new_packet.readData(tcp_start, tcp_header_buffer, 20);
+  				checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
+  				checksum = ~checksum;
+  				checksum = htons(checksum);
+  				new_packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+
+  				sendPacket("IPv4", std::move(new_packet));
+
+  				s.state = ST_ESTAB;
+
+          auto iter = process_table.find(pid);
+          if (iter != process_table.end()) {
+            auto &process = iter->second;
+            assert(process.syscall == CONNECT);
+
+						// auto &param = process.syscall_param.AcceptParam;
+						// int connfd = this->createFileDescriptor(pid);
+						// //fprintf(stderr, "Waking UUID: %d\n", pcb.syscallUUID);
+            //
+						// if (connfd != -1)
+						// {
+            //   auto &c = context_it->second;
+            //   *process.connect_param.addr = c.local_addr;
+            //   *process.connect_param.addrlen = sizeof(c.local_addr);
+						// }
+						this->returnSystemCall(process.syscallUUID, 0);
+            process.isBlocked = false;
+            process_table.erase(pid);
+        }
+        else {
+          assert(0);
+        }
+
+  				// this->returnSystemCall(pcb.syscallUUID, 0);
+			}
+			else if(flag & SYN)
+      {
+        // new_flag = ACK;
+        // new_packet.writeData(tcp_start + 13, &new_flag, 1);
+        //
+        // new_ack_num = htonl(seq_num + 1);
+        // new_packet.writeData(tcp_start + 8, &new_ack_num, 4);
+        //
+        // new_packet.readData(tcp_start, tcp_header_buffer, 20);
+        // checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
+        // checksum = ~checksum;
+        // checksum = htons(checksum);
+        // new_packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+        //
+        // sendPacket("IPv4", std::move(new_packet));
+        //
+        // s.state = ST_SYN_RCVD;
+        //
+        // auto iter = process_table.find(pid);
+        // if (iter != process_table.end()) {
+        //   auto &process = iter->second;
+        //   assert(process.syscall == CONNECT);
+        //
+        //   // auto &param = process.syscall_param.AcceptParam;
+        //   // int connfd = this->createFileDescriptor(pid);
+        //   // //fprintf(stderr, "Waking UUID: %d\n", pcb.syscallUUID);
+        //   //
+        //   // if (connfd != -1)
+        //   // {
+        //   //   auto &c = context_it->second;
+        //   //   *process.connect_param.addr = c.local_addr;
+        //   //   *process.connect_param.addrlen = sizeof(c.local_addr);
+        //   // }
+        //   this->returnSystemCall(process.syscallUUID, 0);
+        //   process.isBlocked = false;
+        //   process_table.erase(pid);
+      }
+				  // Simultaneous open not considered
+    }
       break;
+
 
 		case ST_SYN_RCVD: {	/* 3-way handshake, server. */
       if(LOG)
@@ -340,8 +444,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         }
       }
 
-			break;
+
     }
+      break;
+
+    case ST_ESTAB:
+      break;
 
 		default:
 			assert(0);
@@ -514,7 +622,6 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   }
 
   Context context = s.accept_queue->front();
-  printf("--sin_family = %d\n", ((sockaddr_in *)&context.local_addr)->sin_family);
   s.accept_queue->pop();
 
   Socket new_socket;
@@ -645,8 +752,8 @@ https://linux.die.net/man/2/connect and https://linux.die.net/man/3/connect.
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-  if(LOG) {
-    printf("(pid: %d) syscall_bind\n", pid);
+  if(LOG2) {
+    printf("(pid: %d) syscall_connect\n", pid);
   }
   auto iter = sockets.find({pid, sockfd});
   if(iter == sockets.end()) {
@@ -665,33 +772,49 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
   s.client_context.remote_addr = *addr;
 
-  if(s.state != ST_READY) {
-    // Error
-    return;
-  }
+  // if(s.state != ST_READY) {
+  //   // Error
+  //   this->returnSystemCall(syscallUUID, -1);
+  // }
+
+  in_addr_t network_remote_ip = htonl(remote_ip);
 
   char remote_ip_buffer[20];
-  inet_ntop(AF_INET, &remote_ip, remote_ip_buffer, sizeof(remote_ip_buffer));
+  inet_ntop(AF_INET, &network_remote_ip, remote_ip_buffer, sizeof(remote_ip_buffer));
 
-  char *token = strtok(remote_ip_buffer, ".");
+  //char *token = strtok(remote_ip_buffer, ".");
   ipv4_t converted_remote_ip;
 
   int idx = 0;
+  printf("making ipv4_t in connect():\n");
+  sscanf(remote_ip_buffer, "%d.%d.%d.%d", &converted_remote_ip[0],
+    &converted_remote_ip[1], &converted_remote_ip[2], &converted_remote_ip[3]);
 
-  while (token != NULL) {
-      // printf("%s\n", token);
-      converted_remote_ip[idx++] = atoi(token);
-      token = strtok(NULL, ".");
+  if(LOG2)
+  {
+    printf("  remote_ip_buffer in syscall_connect: %s\n", remote_ip_buffer);
+    printf("  remote_port in syscall_connect: %d\n", remote_port);
   }
 
 	int table_port = getRoutingTable(converted_remote_ip);
-  std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
-  char local_ip_buffer[20];
+  printf("TABLE_PORT: %d\n", table_port);
 
-  for (int i=0; i<4; i++) {
-    std::string buf = std::to_string((*local_ip_array)[i] - '0');
+  std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
+
+  assert(local_ip_array.has_value() == true);
+
+  printf("local_ip_array[0]: %d\n", (*local_ip_array)[0]);
+  printf("local_ip_array[1]: %d\n", (*local_ip_array)[1]);
+  printf("local_ip_array[2]: %d\n", (*local_ip_array)[2]);
+  printf("local_ip_array[3]: %d\n", (*local_ip_array)[3]);
+
+  char local_ip_buffer[20];
+  memset(local_ip_buffer, 0, sizeof(local_ip_buffer));
+
+  for (int i=3; i>=0; i--) {
+    std::string buf = std::to_string((*local_ip_array)[i]);
     strcat(local_ip_buffer, buf.c_str());
-    if(i != 3)
+    if(i != 0)
       strcat(local_ip_buffer, ".");
   }
 
@@ -709,6 +832,12 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 			break;
 	}
 
+  if(LOG2)
+  {
+    printf("  local_ip_buffer in syscall_connect: %s\n", local_ip_buffer);
+    printf("  local_port in syscall_connect: %d\n", local_port);
+  }
+
   pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
 
   s.ip = local_ip;
@@ -716,13 +845,21 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   s.isBound = true;
   s.addr = tie_addr(local_ip, local_port);
   // Not Sure
-  s.addrlen = sizeof(struct sockaddr_in);
+  s.addrlen = sizeof(s.addr);
 
   size_t ip_start = 14;
   size_t tcp_start = 34;
   size_t data_ofs = 20;
 
+  if(LOG2)
+    printf("Here826\n");
+
   Packet packet(tcp_start + data_ofs);
+
+  /* Writing Packet */
+  // Replace by function call if possible.
+  //write_packet_header(&new_packet, ip_start, tcp_start, local_ip,
+  //  remote_ip, local_port, remote_port);
 
   uint32_t ip_buffer = htonl(local_ip);
   packet.writeData(ip_start + 12, &ip_buffer, 4);
@@ -749,13 +886,28 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   packet.readData(tcp_start, tcp_header_buffer, 20);
   uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
   checksum = ~checksum;
-  checksum = htons( checksum);
+  checksum = htons(checksum);
   packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  /* Writing packet finished */
 
-  this->sendPacket("IPv4", std::move(packet));
+  sendPacket("IPv4", std::move(packet));
+
+  if(LOG2)
+    printf("Here867\n");
 
   s.state = ST_SYN_SENT;
   s.client_context.seq_num = ntohl(seq_num);
+
+  // Block process
+  Process p;
+  p.isBlocked = true;
+  p.syscallUUID = syscallUUID;
+  p.syscall = CONNECT;
+  process_table[pid] = p;
+
+  if(LOG2)
+    printf("Here880\n");
+  return;
 }
 
 /*
@@ -773,18 +925,13 @@ supplied to the call.
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	// auto &fd_info = proc_table[pid].fd_info;
-
-	// auto sock_it = fd_info.find(sockfd);
-	// if(sock_it == fd_info.end() || sock_it->second.state != ST_ESTAB)
-	// {
-	// 	this->returnSystemCall(syscallUUID, -1);
-	// 	return;
-	// }
-	// auto &sock = sock_it->second;
-
-	// *addr = sock.context.remote_addr;
-	// *addrlen = (socklen_t)sizeof(sock.context.remote_addr);
+	auto &s = sockets[{pid, sockfd}];
+  // if (s.state != ST_ESTAB) {
+  //   this->returnSystemCall(syscallUUID, -1);
+  //   return;
+  // }
+  *addr = s.client_context.remote_addr;
+  *addrlen = (socklen_t)sizeof(s.client_context.remote_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 

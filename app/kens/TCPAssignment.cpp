@@ -313,42 +313,43 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 			}
 			else if(flag & SYN)
       {
-        // new_flag = ACK;
-        // new_packet.writeData(tcp_start + 13, &new_flag, 1);
-        //
-        // new_ack_num = htonl(seq_num + 1);
-        // new_packet.writeData(tcp_start + 8, &new_ack_num, 4);
-        //
-        // new_packet.readData(tcp_start, tcp_header_buffer, 20);
-        // checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-        // checksum = ~checksum;
-        // checksum = htons(checksum);
-        // new_packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-        //
-        // sendPacket("IPv4", std::move(new_packet));
-        //
-        // s.state = ST_SYN_RCVD;
-        //
-        // auto iter = process_table.find(pid);
-        // if (iter != process_table.end()) {
-        //   auto &process = iter->second;
-        //   assert(process.syscall == CONNECT);
-        //
-        //   // auto &param = process.syscall_param.AcceptParam;
-        //   // int connfd = this->createFileDescriptor(pid);
-        //   // //fprintf(stderr, "Waking UUID: %d\n", pcb.syscallUUID);
-        //   //
-        //   // if (connfd != -1)
-        //   // {
-        //   //   auto &c = context_it->second;
-        //   //   *process.connect_param.addr = c.local_addr;
-        //   //   *process.connect_param.addrlen = sizeof(c.local_addr);
-        //   // }
-        //   this->returnSystemCall(process.syscallUUID, 0);
-        //   process.isBlocked = false;
-        //   process_table.erase(pid);
+        new_flag = ACK;
+        new_packet.writeData(tcp_start + 13, &new_flag, 1);
+
+        new_ack_num = htonl(seq_num + 1);
+        new_packet.writeData(tcp_start + 8, &new_ack_num, 4);
+
+        new_packet.readData(tcp_start, tcp_header_buffer, 20);
+        checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
+        checksum = ~checksum;
+        checksum = htons(checksum);
+        new_packet.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+
+        sendPacket("IPv4", std::move(new_packet));
+
+        s.state = ST_SYN_RCVD;
+
+        auto iter = process_table.find(pid);
+        if (iter != process_table.end()) {
+          auto &process = iter->second;
+          assert(process.syscall == CONNECT);
+
+          // auto &param = process.syscall_param.AcceptParam;
+          // int connfd = this->createFileDescriptor(pid);
+          // //fprintf(stderr, "Waking UUID: %d\n", pcb.syscallUUID);
+          //
+          // if (connfd != -1)
+          // {
+          //   auto &c = context_it->second;
+          //   *process.connect_param.addr = c.local_addr;
+          //   *process.connect_param.addrlen = sizeof(c.local_addr);
+          // }
+          this->returnSystemCall(process.syscallUUID, 0);
+          process.isBlocked = false;
+          process_table.erase(pid);
       }
-				  // Simultaneous open not considered
+    }
+				  // Simultaneous open not considere
     }
       break;
 
@@ -796,56 +797,63 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
     printf("  remote_port in syscall_connect: %d\n", remote_port);
   }
 
-	int table_port = getRoutingTable(converted_remote_ip);
-  printf("TABLE_PORT: %d\n", table_port);
-
-  std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
-
-  assert(local_ip_array.has_value() == true);
-
-  printf("local_ip_array[0]: %d\n", (*local_ip_array)[0]);
-  printf("local_ip_array[1]: %d\n", (*local_ip_array)[1]);
-  printf("local_ip_array[2]: %d\n", (*local_ip_array)[2]);
-  printf("local_ip_array[3]: %d\n", (*local_ip_array)[3]);
-
-  char local_ip_buffer[20];
-  memset(local_ip_buffer, 0, sizeof(local_ip_buffer));
-
-  for (int i=3; i>=0; i--) {
-    std::string buf = std::to_string((*local_ip_array)[i]);
-    strcat(local_ip_buffer, buf.c_str());
-    if(i != 0)
-      strcat(local_ip_buffer, ".");
-  }
-
   in_addr_t local_ip;
-	in_port_t local_port;
+  in_port_t local_port;
 
-  inet_pton(AF_INET, local_ip_buffer, &local_ip);
+  if (!s.isBound){
 
-  /* Find port that is not taken yet */
-	while (true)
-	{
-		local_port = rand() % 65536;
-    if (pid_sockfd_by_ip_port.find({local_ip, local_port}) == pid_sockfd_by_ip_port.end()
-          && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
-			break;
-	}
+  	int table_port = getRoutingTable(converted_remote_ip);
+    printf("TABLE_PORT: %d\n", table_port);
 
-  if(LOG2)
-  {
-    printf("  local_ip_buffer in syscall_connect: %s\n", local_ip_buffer);
-    printf("  local_port in syscall_connect: %d\n", local_port);
+    std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
+
+    assert(local_ip_array.has_value() == true);
+
+    printf("local_ip_array[0]: %d\n", (*local_ip_array)[0]);
+    printf("local_ip_array[1]: %d\n", (*local_ip_array)[1]);
+    printf("local_ip_array[2]: %d\n", (*local_ip_array)[2]);
+    printf("local_ip_array[3]: %d\n", (*local_ip_array)[3]);
+
+    char local_ip_buffer[20];
+    memset(local_ip_buffer, 0, sizeof(local_ip_buffer));
+
+    for (int i=3; i>=0; i--) {
+      std::string buf = std::to_string((*local_ip_array)[i]);
+      strcat(local_ip_buffer, buf.c_str());
+      if(i != 0)
+        strcat(local_ip_buffer, ".");
+    }
+
+
+    inet_pton(AF_INET, local_ip_buffer, &local_ip);
+
+    /* Find port that is not taken yet */
+  	while (true)
+  	{
+  		local_port = rand() % 65536;
+      if (pid_sockfd_by_ip_port.find({local_ip, local_port}) == pid_sockfd_by_ip_port.end()
+            && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
+  			break;
+  	}
+
+    if(LOG2)
+    {
+      printf("  local_ip_buffer in syscall_connect: %s\n", local_ip_buffer);
+      printf("  local_port in syscall_connect: %d\n", local_port);
+    }
+
+    pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
+    s.ip = local_ip;
+    s.port = local_port;
+    s.isBound = true;
+    s.addr = tie_addr(local_ip, local_port);
+    // Not Sure
+    s.addrlen = sizeof(s.addr);
   }
-
-  pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
-
-  s.ip = local_ip;
-  s.port = local_port;
-  s.isBound = true;
-  s.addr = tie_addr(local_ip, local_port);
-  // Not Sure
-  s.addrlen = sizeof(s.addr);
+  else {
+    local_ip = s.ip;
+    local_port = s.port;
+  }
 
   size_t ip_start = 14;
   size_t tcp_start = 34;

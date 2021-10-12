@@ -18,38 +18,40 @@
 // Can I use stdlib.h?
 #include <stdlib.h>
 
+// #define SYN 2
+// #define ACK 16
+// #define FIN 1
+
 namespace E {
 
-  // const static int MAX_PORT_NUM = 65536;
-  //
-  // const int ACK = 1 << 4;
-  // const int RST = 1 << 2;
-  // const int SYN = 1 << 1;
-  // const int FIN = 1 << 0;
-
+  const int ACK = 1 << 4;
+	const int RST = 1 << 2;
+	const int SYN = 1 << 1;
+	const int FIN = 1 << 0;
 
   enum TCP_STATE
   {
-    INIT_STATE,
+    INITIAL_STATE,
     CLOSED_STATE,
     LISTEN_STATE,
     SYN_RCVD_STATE,
     SYN_SENT_STATE,
-    ESTAB_STATE
+    ESTABLISHED_STATE,
+    CLOSE_WAIT_STATE,
+    LAST_ACK_STATE,
+    FIN_WAIT_1_STATE,
+    FIN_WAIT_2_STATE,
+    CLOSING_STATE,
+    TIME_WAIT_STATE
   };
 
   typedef struct _DataInfo
 	{
-		// sockaddr local_addr;
-    in_addr_t local_ip;
-    in_port_t local_port;
     sockaddr local_addr;
-    in_addr_t remote_ip;
-    in_port_t remote_port;
     sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
-    uint8_t header_length;
+    uint8_t data_ofs_ns;
     uint8_t flag;
 	} DataInfo;
 
@@ -81,11 +83,34 @@ namespace E {
     unsigned int backlog;
   } Socket;
 
-  typedef struct _Process
+  typedef struct _CloseParam
   {
+    int fd;
     sockaddr *addr;
     socklen_t *addrlen;
+  } CloseParam;
+
+  typedef struct _AcceptParam
+  {
+    int fd;
+    sockaddr *addr;
+    socklen_t *addrlen;
+  } AcceptParam;
+
+  typedef struct _ConnectParam
+  {
+    int fd;
+    sockaddr *addr;
+    socklen_t *addrlen;
+  } ConnectParam;
+
+  typedef struct _Process
+  {
+    bool isBlocked;
+    int syscall;
 		UUID syscallUUID;
+    AcceptParam accept_param;
+    ConnectParam connect_param;
   } Process;
 
 class TCPAssignment : public HostModule,
@@ -99,10 +124,10 @@ private:
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
-  // (pid, sockfd) -> Context
-  std::map<std::pair<int, int>, DataInfo> data_infos;
+  // (pid, sockfd) -> DataInfo
+  std::map<std::pair<int, int>, DataInfo> data_info_by_pid_sockfd;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
-  std::map<int, Process> blocked_process_table;
+  std::map<int, Process> process_table;
 
 public:
   TCPAssignment(Host &host);
@@ -127,25 +152,15 @@ public:
 		int sockfd, int backlog);
 
     // Utility Functions
-    std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+    std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
 
-    sockaddr unit_addr(in_addr_t ip, in_port_t port);
+    sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
     void read_packet_header(Packet *packet, DataInfo *c);
 
-    void write_packet_header(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      in_addr_t local_ip, in_addr_t remote_ip,
-      in_port_t local_port, in_port_t remote_port);
+    void write_packet_header(Packet *new_packet, DataInfo *c);
 
-    void write_packet_response(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
-      in_addr_t local_ip, in_addr_t remote_ip);
-
-    void write_packet_header_mod(Packet *new_packet, DataInfo *c);
-
-    void write_packet_response_mod(Packet *new_packet, DataInfo *sc, DataInfo *rc);
+    void write_packet_response(Packet *new_packet, DataInfo *sc, DataInfo *rc);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

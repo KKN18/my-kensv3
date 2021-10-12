@@ -15,17 +15,8 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-// Can I use stdlib.h?
-#include <stdlib.h>
 
 namespace E {
-
-  // const static int MAX_PORT_NUM = 65536;
-  //
-  // const int ACK = 1 << 4;
-  // const int RST = 1 << 2;
-  // const int SYN = 1 << 1;
-  // const int FIN = 1 << 0;
 
 
   enum TCP_STATE
@@ -40,7 +31,6 @@ namespace E {
 
   typedef struct _DataInfo
 	{
-		// sockaddr local_addr;
     in_addr_t local_ip;
     in_port_t local_port;
     sockaddr local_addr;
@@ -55,11 +45,9 @@ namespace E {
 
   typedef struct _Socket
   {
-    //process information
     int pid;
     int fd;
 
-    //socket info
     int type;
     int protocol;
     uint32_t ip;
@@ -75,7 +63,6 @@ namespace E {
     // For client
     DataInfo client_info;
 
-    // Queue for listening socket
     std::queue<Packet> *listen_queue;
 		std::queue<DataInfo> *accept_queue;
     unsigned int backlog;
@@ -99,7 +86,7 @@ private:
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
-  // (pid, sockfd) -> Context
+  // (pid, sockfd) -> DataInfo
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> blocked_process_table;

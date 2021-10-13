@@ -63,8 +63,8 @@ namespace E {
     // For client
     DataInfo client_info;
 
-    std::queue<Packet> *listen_queue;
-		std::queue<DataInfo> *accept_queue;
+    std::queue<Packet> *listenQueue;
+		std::queue<DataInfo> *acceptQueue;
     unsigned int backlog;
   } Socket;
 

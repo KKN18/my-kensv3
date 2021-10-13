@@ -145,7 +145,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   assert(pid == s.pid);
 
   /* Write Packet START */
-  // int tcp_start = 34;
 	Packet new_packet(HEADER_SIZE);
   write_packet_header_mod(&new_packet, &received_info);
 
@@ -260,14 +259,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
       if(flag & SYN)
       {
-        if (s.listen_queue->size() + 1 < s.backlog){
+        if (s.listenQueue->size() + 1 < s.backlog){
           Packet clone_packet = packet;
-          s.listen_queue->push(clone_packet);
+          s.listenQueue->push(clone_packet);
         }
         if(LOG)
         {
           printf("  Currently working on another socket... Put in Queue\n");
-          printf("  Listen Queue Size: %d\n", s.listen_queue->size());
+          printf("  Listen Queue Size: %d\n", s.listenQueue->size());
         }
 
         return;
@@ -329,18 +328,18 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             blocked_process_table.erase(pid);
         }
         else {
-          s.accept_queue->push(info);
+          s.acceptQueue->push(info);
         }
 
         s.state = LISTEN_STATE;
-        if(s.listen_queue->empty()) {
+        if(s.listenQueue->empty()) {
           return;
         }
 
-        // Get a packet from listen_queue
-        Packet const& resend_packet = s.listen_queue->front();
+        // Get a packet from listenQueue
+        Packet const& resend_packet = s.listenQueue->front();
         Packet clone_packet = resend_packet;
-        s.listen_queue->pop();
+        s.listenQueue->pop();
         packetArrived("IPv4", std::move(clone_packet));
 
         return;
@@ -441,10 +440,15 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   if(LOG2) {
     printf("(pid: %d) syscall_connect\n", pid);
   }
+
   auto iter = sockets.find({pid, sockfd});
   if(iter == sockets.end()) {
     this->returnSystemCall(syscallUUID, -1);
   }
+
+  Process p;
+  p.syscallUUID = syscallUUID;
+  blocked_process_table[pid] = p;
 
   auto &s = iter->second;
 
@@ -487,13 +491,12 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
     inet_pton(AF_INET, local_ip_buffer, &local_ip);
 
     /* Find port that is not taken yet */
-  	while (true)
-  	{
-  		local_port = rand() % 65536;
+    for(int i=65535; i>0; i--) {
+      local_port = i;
       if (pid_sockfd_by_ip_port.find({local_ip, local_port}) == pid_sockfd_by_ip_port.end()
             && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
   			break;
-  	}
+    }
 
     pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
     s.ip = local_ip;
@@ -507,46 +510,29 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
     local_ip = s.ip;
     local_port = s.port;
   }
-
-  size_t ip_start = 14;
-  size_t tcp_start = 34;
-  // size_t data_ofs = 20;
-
-  Packet packet(tcp_start + DATA_OFS);
-
-  /* Writing Packet */
-  write_packet_header(&packet, ip_start, tcp_start, local_ip,
-    remote_ip, local_port, remote_port);
-
-  uint8_t flag = SYN;
-  packet.writeData(tcp_start + 13, &flag, 1);
-
-  uint32_t seq_num = htonl(rand());
-  packet.writeData(tcp_start + 4, &seq_num, 4);
-
-  uint8_t buffer[DATA_OFS];
-  packet.readData(tcp_start, buffer, DATA_OFS);
-
   in_addr_t local_ip_converted = htonl(local_ip);
   in_addr_t remote_ip_converted = htonl(remote_ip);
+  Packet packet(HEADER_SIZE);
+
+  /* Writing Packet */
+  uint32_t rand_num = rand();
+  uint32_t seq_num = htonl(rand_num);
+  uint8_t flag = SYN;
+  packet.writeData(TCP_START + 4, &seq_num, 4);
+  packet.writeData(TCP_START + 13, &flag, 1);
+  write_packet_header(&packet, IP_START, TCP_START, local_ip,
+    remote_ip, local_port, remote_port);
+
+  uint8_t buffer[DATA_OFS];
+  packet.readData(TCP_START, buffer, DATA_OFS);
 
   uint16_t checksum = ~NetworkUtil::tcp_sum(local_ip_converted, remote_ip_converted, buffer, DATA_OFS);
-  checksum = htons(checksum);
-  packet.writeData(tcp_start + 16, &checksum, 2);
+  uint16_t checksum_converted = htons(checksum);
+  packet.writeData(TCP_START + 16, &checksum_converted, 2);
   /* Writing packet finished */
 
   sendPacket("IPv4", std::move(packet));
-
   s.state = SYN_SENT_STATE;
-  s.client_info.seq_num = ntohl(seq_num);
-
-  // Block process
-  Process p;
-  // p.isBlocked = true;
-  p.syscallUUID = syscallUUID;
-  // p.syscall = CONNECT;
-  blocked_process_table[pid] = p;
-
   return;
 }
 
@@ -589,8 +575,8 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
   auto &s = sock_it->second;
 
 	s.state = LISTEN_STATE;
-  s.listen_queue = new std::queue<Packet>;
-  s.accept_queue = new std::queue<DataInfo>;
+  s.listenQueue = new std::queue<Packet>;
+  s.acceptQueue = new std::queue<DataInfo>;
   s.backlog = (unsigned int) backlog;
 
   this->returnSystemCall(syscallUUID, 0);
@@ -624,13 +610,11 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   if (fd < 0)
     return;
 
-  if(s.accept_queue->empty())
+  if(s.acceptQueue->empty())
   {
     Process p;
 
-    // p.isBlocked = true;
     p.syscallUUID = syscallUUID;
-    // p.syscall = ACCEPT;
     p.addr = addr;
     p.addrlen = addrlen;
 
@@ -639,8 +623,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
     return;
   }
 
-  DataInfo info = s.accept_queue->front();
-  s.accept_queue->pop();
+  DataInfo info = s.acceptQueue->front();
+  s.acceptQueue->pop();
 
   Socket new_socket;
   std::tie(new_socket.ip, new_socket.port) = divide_addr(info.local_addr);
@@ -660,16 +644,6 @@ The bind() call receives 3 parameters from the application layer. Now it should 
 address to the socket. More details about the socket call are described
 https://linux.die.net/man/2/bind and https://linux.die.net/man/3/bind .
 In KENS, you need to implement only sockaddr_in type for sockaddr.
-
-// struct sockaddr_in {
-// sa_family_t sin_family;  // address family: AF_INET
-// in_port_t sin_port;  // port in network byte order
-// struct in_addr sin_addr;  // internet address
-// };
-// // Internet address.
-// struct in_addr {
-// uint32_t s_addr; // address in network byte order
-// };
 
 The only value you should assign to sin_family is AF_INET. The two fields, sin_port and
 sin_addr, must follow the network byte order. The sin_addr field must be either an IP
@@ -799,43 +773,43 @@ sockaddr TCPAssignment::unit_addr(in_addr_t ip, in_port_t port)
 	return *(sockaddr *)(&addr);
 }
 
-void TCPAssignment::read_packet_header(Packet *packet, DataInfo *c)
+void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)
 {
-  uint32_t ip_buffer;
-	uint16_t port_buffer;
-  uint32_t seq_num_buffer;
-  uint32_t ack_num_buffer;
-  uint8_t header_length_buffer;
-  uint8_t flag_buffer;
+  uint32_t ip_msg;
+	uint16_t port_msg;
+  uint32_t seq_num_msg;
+  uint32_t ack_num_msg;
+  uint8_t header_length_msg;
+  uint8_t flag_msg;
 
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
 
-  packet->readData(IP_START + 12, &ip_buffer, 4);
-	packet->readData(TCP_START + 0, &port_buffer, 2);
-  remote_ip = (in_addr_t)ntohl(ip_buffer);
-  remote_port = (in_port_t)ntohs(port_buffer);
+  packet->readData(IP_START + 12, &ip_msg, 4);
+	packet->readData(TCP_START + 0, &port_msg, 2);
+  remote_ip = (in_addr_t)ntohl(ip_msg);
+  remote_port = (in_port_t)ntohs(port_msg);
 
-  c->remote_addr = unit_addr(remote_ip, remote_port);
+  info->remote_addr = unit_addr(remote_ip, remote_port);
 
-  packet->readData(IP_START + 16, &ip_buffer, 4);
-	packet->readData(TCP_START + 2, &port_buffer, 2);
-  local_ip = (in_addr_t)ntohl(ip_buffer);
-  local_port = (in_port_t)ntohs(port_buffer);
+  packet->readData(IP_START + 16, &ip_msg, 4);
+	packet->readData(TCP_START + 2, &port_msg, 2);
+  local_ip = (in_addr_t)ntohl(ip_msg);
+  local_port = (in_port_t)ntohs(port_msg);
 
-  c->local_addr = unit_addr(local_ip, local_port);
+  info->local_addr = unit_addr(local_ip, local_port);
 
-  packet->readData(TCP_START + 4, &seq_num_buffer, 4);
-  c->seq_num = ntohl(seq_num_buffer);
+  packet->readData(TCP_START + 4, &seq_num_msg, 4);
+  info->seq_num = ntohl(seq_num_msg);
 
-	packet->readData(TCP_START + 8, &ack_num_buffer, 4);
-	c->ack_num = ntohl(ack_num_buffer);
+	packet->readData(TCP_START + 8, &ack_num_msg, 4);
+	info->ack_num = ntohl(ack_num_msg);
 
-	packet->readData(TCP_START + 12, &header_length_buffer, 1);
-  c->header_length = header_length_buffer;
+	packet->readData(TCP_START + 12, &header_length_msg, 1);
+  info->header_length = header_length_msg;
 
-	packet->readData(TCP_START + 13, &flag_buffer, 1);
-  c->flag = flag_buffer;
+	packet->readData(TCP_START + 13, &flag_msg, 1);
+  info->flag = flag_msg;
 
   return;
 }
@@ -845,18 +819,17 @@ void TCPAssignment::write_packet_response(Packet *new_packet,
   uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
   in_addr_t local_ip, in_addr_t remote_ip)
 {
-  uint8_t tcp_header_buffer[20];
+  uint8_t tcp_data[DATA_OFS];
 	uint16_t checksum;
 
-  new_packet->writeData(tcp_start + 13, &new_flag, 1);
   new_packet->writeData(tcp_start + 4, &new_seq_num, 4);
   new_packet->writeData(tcp_start + 8, &new_ack_num, 4);
+  new_packet->writeData(tcp_start + 13, &new_flag, 1);
 
-  new_packet->readData(tcp_start, tcp_header_buffer, 20);
-  checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-  checksum = ~checksum;
-  checksum = htons(checksum);
-  new_packet->writeData(tcp_start + 16, &checksum, 2);
+  new_packet->readData(tcp_start, tcp_data, DATA_OFS);
+  checksum = ~NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_data, DATA_OFS);
+  uint16_t checksum_converted = htons(checksum);
+  new_packet->writeData(tcp_start + 16, &checksum_converted, 2);
 
   return;
 }
@@ -866,17 +839,17 @@ void TCPAssignment::write_packet_header(Packet *new_packet,
   in_addr_t local_ip, in_addr_t remote_ip,
   in_port_t local_port, in_port_t remote_port)
 {
-  uint32_t ip_buffer;
-	uint16_t port_buffer;
-  ip_buffer = htonl(local_ip);
-	new_packet->writeData(ip_start + 12, &ip_buffer, 4);
-	ip_buffer = htonl(remote_ip);
-	new_packet->writeData(ip_start + 16, &ip_buffer, 4);
+  uint32_t ip_msg;
+	uint16_t port_msg;
+  ip_msg = htonl(local_ip);
+	new_packet->writeData(ip_start + 12, &ip_msg, 4);
+	ip_msg = htonl(remote_ip);
+	new_packet->writeData(ip_start + 16, &ip_msg, 4);
 
-	port_buffer = htons(local_port);
-	new_packet->writeData(tcp_start + 0, &port_buffer, 2);
-	port_buffer = htons(remote_port);
-	new_packet->writeData(tcp_start + 2, &port_buffer, 2);
+	port_msg = htons(local_port);
+	new_packet->writeData(tcp_start + 0, &port_msg, 2);
+	port_msg = htons(remote_port);
+	new_packet->writeData(tcp_start + 2, &port_msg, 2);
 
   // Can new_data_ofs_ns and window_size change?
 	uint8_t data_ofs = DATA_OFS;
@@ -887,26 +860,26 @@ void TCPAssignment::write_packet_header(Packet *new_packet,
   return;
 }
 
-void TCPAssignment::write_packet_header_mod(Packet *new_packet, DataInfo *c)
+void TCPAssignment::write_packet_header_mod(Packet *new_packet, DataInfo *info)
 {
-  uint32_t ip_buffer;
-	uint16_t port_buffer;
+  uint32_t ip_msg;
+	uint16_t port_msg;
 
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
 
-  std::tie(local_ip, local_port) = divide_addr(c->local_addr);
-  std::tie(remote_ip, remote_port) = divide_addr(c->remote_addr);
+  std::tie(local_ip, local_port) = divide_addr(info->local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(info->remote_addr);
 
-  ip_buffer = htonl(local_ip);
-	new_packet->writeData(IP_START + 12, &ip_buffer, 4);
-	ip_buffer = htonl(remote_ip);
-	new_packet->writeData(IP_START + 16, &ip_buffer, 4);
+  ip_msg = htonl(local_ip);
+	new_packet->writeData(IP_START + 12, &ip_msg, 4);
+	ip_msg = htonl(remote_ip);
+	new_packet->writeData(IP_START + 16, &ip_msg, 4);
 
-	port_buffer = htons(local_port);
-	new_packet->writeData(TCP_START + 0, &port_buffer, 2);
-	port_buffer = htons(remote_port);
-	new_packet->writeData(TCP_START + 2, &port_buffer, 2);
+	port_msg = htons(local_port);
+	new_packet->writeData(TCP_START + 0, &port_msg, 2);
+	port_msg = htons(remote_port);
+	new_packet->writeData(TCP_START + 2, &port_msg, 2);
 
 	uint8_t header_length = 80;
 	uint16_t window = htons(51200);
@@ -918,18 +891,18 @@ void TCPAssignment::write_packet_header_mod(Packet *new_packet, DataInfo *c)
 
 void TCPAssignment::write_packet_response_mod(Packet *new_packet, DataInfo *send_info, DataInfo *received_info)
 {
-  uint8_t buffer[DATA_OFS];
+  uint8_t tcp_data[DATA_OFS];
 	uint16_t checksum;
   uint32_t seq_num, ack_num;
 
   seq_num = htonl(send_info->seq_num);
   ack_num = htonl(send_info->ack_num);
 
-  new_packet->writeData(TCP_START + 13, &(send_info->flag), 1);
   new_packet->writeData(TCP_START + 4, &seq_num, 4);
   new_packet->writeData(TCP_START + 8, &ack_num, 4);
+  new_packet->writeData(TCP_START + 13, &(send_info->flag), 1);
 
-  new_packet->readData(TCP_START, buffer, DATA_OFS);
+  new_packet->readData(TCP_START, tcp_data, DATA_OFS);
 
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
@@ -940,9 +913,9 @@ void TCPAssignment::write_packet_response_mod(Packet *new_packet, DataInfo *send
   local_ip = htonl(local_ip);
   remote_ip = htonl(remote_ip);
 
-  checksum = ~ NetworkUtil::tcp_sum(local_ip, remote_ip, buffer, DATA_OFS);
-  checksum = htons(checksum);
-  new_packet->writeData(TCP_START + 16, &checksum, 2);
+  checksum = ~ NetworkUtil::tcp_sum(local_ip, remote_ip, tcp_data, DATA_OFS);
+  uint16_t checksum_converted = htons(checksum);
+  new_packet->writeData(TCP_START + 16, &checksum_converted, 2);
 
   return;
 }

@@ -61,7 +61,7 @@ namespace E {
     enum TCP_STATE state;
 
     // For client
-    DataInfo client_info;
+    sockaddr connect_addr;
 
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;

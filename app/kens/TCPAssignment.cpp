@@ -451,13 +451,12 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   blocked_process_table[pid] = p;
 
   auto &s = iter->second;
+  s.connect_addr = *addr;
 
   in_addr_t remote_ip, local_ip;
   in_port_t remote_port, local_port;
 
   std::tie(remote_ip, remote_port) = divide_addr(*addr);
-
-  s.client_info.remote_addr = *addr;
 
   in_addr_t network_remote_ip = htonl(remote_ip);
 
@@ -749,8 +748,8 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	auto &s = sockets[{pid, sockfd}];
-  *addr = s.client_info.remote_addr;
-  *addrlen = (socklen_t)sizeof(s.client_info.remote_addr);
+  *addr = s.connect_addr;
+  *addrlen = (socklen_t)sizeof(s.connect_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 

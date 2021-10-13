@@ -522,10 +522,10 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   write_packet_header(&packet, IP_START, TCP_START, local_ip,
     remote_ip, local_port, remote_port);
 
-  uint8_t buffer[DATA_OFS];
-  packet.readData(TCP_START, buffer, DATA_OFS);
+  uint8_t tcp_data[DATA_OFS];
+  packet.readData(TCP_START, tcp_data, DATA_OFS);
 
-  uint16_t checksum = ~NetworkUtil::tcp_sum(local_ip_converted, remote_ip_converted, buffer, DATA_OFS);
+  uint16_t checksum = ~NetworkUtil::tcp_sum(local_ip_converted, remote_ip_converted, tcp_data, DATA_OFS);
   uint16_t checksum_converted = htons(checksum);
   packet.writeData(TCP_START + 16, &checksum_converted, 2);
   /* Writing packet finished */
@@ -749,7 +749,7 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 {
 	auto &s = sockets[{pid, sockfd}];
   *addr = s.connect_addr;
-  *addrlen = (socklen_t)sizeof(s.connect_addr);
+  *addrlen = sizeof(s.connect_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -764,12 +764,13 @@ std::pair<in_addr_t, in_port_t> TCPAssignment::divide_addr(sockaddr addr)
 
 sockaddr TCPAssignment::unit_addr(in_addr_t ip, in_port_t port)
 {
-  sockaddr_in addr;
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(ip);
-	return *(sockaddr *)(&addr);
+  struct sockaddr_in addr_unit;
+	memset(&addr_unit, 0, sizeof(struct sockaddr_in));
+	addr_unit.sin_family = AF_INET;
+  addr_unit.sin_addr.s_addr = htonl(ip);
+	addr_unit.sin_port = htons(port);
+  struct sockaddr *addr_cast = (struct sockaddr *)(&addr_unit);
+	return *addr_cast;
 }
 
 void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)

@@ -52,12 +52,12 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     this->syscall_close(syscallUUID, pid, param.param1_int);
     break;
   case READ:
-    // this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,
-    // param.param3_int);
+    this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,
+    param.param3_int);
     break;
   case WRITE:
-    // this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,
-    // param.param3_int);
+    this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,
+    param.param3_int);
     break;
   case CONNECT:
     this->syscall_connect(syscallUUID, pid, param.param1_int,
@@ -362,6 +362,44 @@ void TCPAssignment::timerCallback(std::any payload) {
   }
   // Remove below
   (void)payload;
+}
+
+/*
+The read() call receives three parameters from the application layer:
+a socket (file) descriptor, a pointer to application’s read buffer,
+and the number of bytes to read from the socket.
+It should return the number of bytes read.
+
+When an application calls read(), the TCP layer is in one of the following two situations:
+(1) If there is already received data in the corresponding TCP socket’s receive buffer,
+the data is copied to the application’s buffer and the call returns immediately.
+(2) If there is no received data, the call blocks until any data is received from the sender.
+When data arrives, the data is copied to the application’s buffer and the call returns.
+*/
+ssize_t TCPAssignment::read(UUID syscallUUID, int fd, void *buf, size_t count)
+{
+  return;
+}
+
+/*
+The write() call receives three parameters from the application layer:
+a socket (file) descriptor, a pointer to application’s data to write,
+the number of bytes to write to the socket.
+It should return the number of bytes written.
+
+When an application calls write(), the TCP layer is in one of the following two situations:
+
+(1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer. Then,
+  (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
+  (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
+(2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data. When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer and then,
+  (a) if the data is sendable (i.e., the data lies in the sender-side window), send the data and the call returns.
+  (b) if the data is not sendable (i.e., the data lies outside the sender-side window), the call just returns.
+
+*/
+ssize_t TCPAssignment::write(UUID syscallUUID, int fd, const void *buf, size_t count)
+{
+  return;
 }
 
 /*
@@ -752,6 +790,8 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
   *addrlen = sizeof(s.connect_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
+
+/* Utility Functions For Packet Manipulation */
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::divide_addr(sockaddr addr)
 {

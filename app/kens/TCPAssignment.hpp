@@ -66,6 +66,13 @@ namespace E {
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;
     unsigned int backlog;
+
+    // For read, write
+    char *receive_buffer;
+    char *receive_ptr;
+    bool is_rcvd_data;
+    char *send_buffer;
+    bool enough_send_space;
   } Socket;
 
   typedef struct _Process
@@ -74,6 +81,14 @@ namespace E {
     socklen_t *addrlen;
 		UUID syscallUUID;
   } Process;
+
+  typedef struct _IOProcess
+  {
+    int fd;
+    void *buf;
+    size_t count;
+    UUID syscallUUID;
+  } IOProcess;
 
 class TCPAssignment : public HostModule,
                       private RoutingInfoInterface,
@@ -90,6 +105,8 @@ private:
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> blocked_process_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, IOProcess> blocked_io_table;
 
 public:
   TCPAssignment(Host &host);
@@ -98,6 +115,8 @@ public:
   virtual ~TCPAssignment();
 
   // Our Implementation
+  ssize_t syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
+  ssize_t syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
   void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
 	void syscall_close(UUID syscallUUID, int pid, int fd);
 	void syscall_bind(UUID syscallUUID, int pid,

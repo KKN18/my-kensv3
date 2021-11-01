@@ -13,13 +13,16 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define LOG 0
-#define LOG2 0
+#define FUNCTION_LOG 1
+#define LOG 1
 #define IP_START 14
 #define TCP_START 34
 #define HEADER_SIZE 54
 #define WINDOW_SIZE 51200
 #define DATA_OFS 20
+#define RECEIVE_BUFFER_SIZE 2097152 // 2*1024*1024
+#define SEND_BUFFER_SIZE 2097152 // 2*1024*1024
+#define MSS 1460
 
 #define ACK 16
 #define SYN 2
@@ -40,9 +43,9 @@ void TCPAssignment::finalize() {}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
-  if(LOG) {
-    printf("(pid: %d) systemCallback\n", pid);
-  }
+  // if(FUNCTION_LOG) {
+  //   printf("(pid: %d) systemCallback\n", pid);
+  // }
 
   switch (param.syscallNumber) {
   case SOCKET:
@@ -129,10 +132,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   fd = iter->second.second;
 
   auto iter2 = sockets.find({pid, fd});
-  if(LOG2)
-  {
-    printf("   sockets.find({%d %d})\n", pid, fd);
-  }
 
   if(iter2 == sockets.end()){
     // Error: Socket not found
@@ -318,6 +317,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             new_socket.addrlen = sizeof(info.local_addr);
             new_socket.isBound = true;
             new_socket.state = ESTAB_STATE;
+            new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
+            new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
 
             *process.addr = info.local_addr;
             *process.addrlen = sizeof(info.local_addr);
@@ -348,16 +349,58 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     }
       break;
 
-    case ESTAB_STATE:
-      break;
+    case ESTAB_STATE: {
+    /*
+    When a data packet arrives (to the TCP layer), you should:
+    copy the payload to the corresponding TCP socket’s receive buffer
+    acknowledge received packet (i.e., send an ACK packet)
+    */
+      // (1) Copy the payload
+      s.is_rcvd_data = true;
 
+      uint8_t ihl;
+      uint16_t total_length;
+      packet.readData(IP_START, &ihl, 1);
+      ihl = ntohs(ihl & 31);
+      packet.readData(IP_START + 2, &total_length, 2);
+      total_length = ntohs(total_length);
+
+      uint8_t data_ofs;
+      packet.readData(TCP_START + 12, &data_ofs, 1);
+      data_ofs = ntohs(data_ofs & 224);
+
+      uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+
+      packet.readData(TCP_START + data_ofs, s.receive_ptr, data_length);
+      s.receive_ptr += data_length;
+
+      auto iter = blocked_io_table.find({pid, fd});
+      if (iter != blocked_io_table.end()) {
+        auto &p = iter->second;
+        memcpy(p.buf, s.receive_buffer, p.count);
+        this->returnSystemCall(p.syscallUUID, p.fd);
+      }
+      // (2) Acknowledge received packet
+      DataInfo info;
+      info.local_ip = local_ip; info.local_port = local_port;
+      info.local_addr = unit_addr(local_ip, local_port);
+      info.remote_ip = remote_ip; info.remote_port = remote_port;
+      info.remote_addr = unit_addr(remote_ip, remote_port);
+      info.seq_num = ack_num; info.ack_num = seq_num + data_length;
+      info.flag = ACK;
+
+      write_packet_response_mod(&new_packet, &info, &received_info);
+
+      sendPacket("IPv4", std::move(new_packet));
+      break;
+    }
 		default:
 			assert(0);
 	}
 }
 
 void TCPAssignment::timerCallback(std::any payload) {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("timerCallback\n");
   }
   // Remove below
@@ -376,9 +419,26 @@ the data is copied to the application’s buffer and the call returns immediatel
 (2) If there is no received data, the call blocks until any data is received from the sender.
 When data arrives, the data is copied to the application’s buffer and the call returns.
 */
-ssize_t TCPAssignment::read(UUID syscallUUID, int fd, void *buf, size_t count)
+ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count)
 {
-  return;
+  if(FUNCTION_LOG) {
+    // printf("(pid: %d) syscall_read\n", pid);
+  }
+  Socket s = sockets[{pid, fd}];
+  if (s.is_rcvd_data){
+      memcpy(buf, s.receive_buffer, count);
+      this->returnSystemCall(syscallUUID, fd);
+      return count;
+  }
+  else {
+      IOProcess read_p;
+      read_p.fd = fd;
+      read_p.buf = buf;
+      read_p.count = count;
+      read_p.syscallUUID = syscallUUID;
+      blocked_io_table[{pid, fd}] = read_p;
+      return count;
+  }
 }
 
 /*
@@ -397,9 +457,21 @@ When an application calls write(), the TCP layer is in one of the following two 
   (b) if the data is not sendable (i.e., the data lies outside the sender-side window), the call just returns.
 
 */
-ssize_t TCPAssignment::write(UUID syscallUUID, int fd, const void *buf, size_t count)
+ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count)
 {
-  return;
+  this->returnSystemCall(syscallUUID, fd);
+  return count;
+
+  // Socket s = sockets[{pid, fd}];
+  // if(s.enough_send_space)
+  // {
+  //   // if(data lies in sender window)
+  // }
+  // else
+  // {
+  //
+  // }
+  // return;
 }
 
 /*
@@ -411,7 +483,7 @@ to implement only domain AF_INET, type SOCK_STREAM, and protocol IPPROTO_TCP.
 */
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol)
 {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_socket\n", pid);
   }
 
@@ -432,6 +504,11 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.protocol = protocol;
   s.isBound = false;
   s.state = INIT_STATE;
+  s.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
+  s.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+  s.is_rcvd_data = false;
+  s.enough_send_space = true;
+  s.receive_ptr = s.receive_buffer;
 
   sockets[{pid, fd}] = s;
 
@@ -445,7 +522,7 @@ described https://linux.die.net/man/2/close and https://linux.die.net/man/3/clos
 */
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_close\n", pid);
   }
   auto iter = sockets.find({pid, fd});
@@ -459,6 +536,11 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
     ip = s.ip;
     port = s.port;
+
+    // Free malloced memory in syscall_socket
+    free(s.receive_buffer);
+    free(s.send_buffer);
+
     sockets.erase(iter);
     pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(ip, port));
   }
@@ -475,7 +557,7 @@ https://linux.die.net/man/2/connect and https://linux.die.net/man/3/connect.
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-  if(LOG2) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_connect\n", pid);
   }
 
@@ -584,7 +666,7 @@ https://linux.die.net/man/3/listen.
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_listen\n", pid);
   }
 	auto sock_it = sockets.find({pid, sockfd});
@@ -629,7 +711,7 @@ https://linux.die.net/man/3/accept .
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_accept\n", pid);
   }
 
@@ -668,6 +750,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.addr = info.local_addr;
   new_socket.addrlen = sizeof(info.local_addr);
   new_socket.isBound = true;
+  new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
+  new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
 
@@ -690,7 +774,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
 
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_bind\n", pid);
   }
   // Error: No sockets found
@@ -744,7 +828,7 @@ only the sockaddr_in type for sockaddr.
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-  if(LOG) {
+  if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_getsockname\n", pid);
   }
 

@@ -132,6 +132,8 @@ protected:
                          remaining)) >= 0) {
           total_size += read_byte;
           remaining -= read_byte;
+          printf("read byte: %d\n", read_byte);
+          printf("remaining: %d\n", remaining);
           EXPECT_GE(remaining, 0);
           if (remaining == 0)
             break;
@@ -610,7 +612,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_SmallBuffer2) {
 }
 */
 //======================================
-
+/*
 TEST_F(TestEnv_Any, TestTransfer_Accept_Send_Symmetric) {
   std::unordered_map<std::string, std::string> accept_env;
   std::unordered_map<std::string, std::string> connect_env;
@@ -777,7 +779,7 @@ TEST_F(TestEnv_Any, TestTransfer_Accept_Recv_Symmetric) {
 
   this->runTest();
 }
-
+*/
 TEST_F(TestEnv_Any, TestTransfer_Accept_Recv_EOF) {
   std::unordered_map<std::string, std::string> accept_env;
   std::unordered_map<std::string, std::string> connect_env;
@@ -832,7 +834,7 @@ TEST_F(TestEnv_Any, TestTransfer_Accept_Recv_EOF) {
 
   this->runTest();
 }
-
+/*
 TEST_F(TestEnv_Any, TestTransfer_Accept_Recv_SmallBuffer1) {
   std::unordered_map<std::string, std::string> accept_env;
   std::unordered_map<std::string, std::string> connect_env;
@@ -942,3 +944,4 @@ TEST_F(TestEnv_Any, TestTransfer_Accept_Recv_SmallBuffer2) {
 
   this->runTest();
 }
+*/

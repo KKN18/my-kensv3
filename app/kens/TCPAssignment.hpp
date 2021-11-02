@@ -50,8 +50,10 @@ namespace E {
 
     int type;
     int protocol;
-    uint32_t ip;
-    int port;
+    // uint32_t ip;
+    // int port;
+    in_addr_t ip;
+    in_port_t port;
 
     bool isBound;
     sockaddr addr;

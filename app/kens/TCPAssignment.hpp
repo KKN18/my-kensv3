@@ -46,8 +46,6 @@ namespace E {
 
     int type;
     int protocol;
-    // uint32_t ip;
-    // int port;
     in_addr_t ip;
     in_port_t port;
 
@@ -99,6 +97,8 @@ private:
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
+  // (ip, port) -> (pid, sockfd)
+  std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> estab_pid_sockfd_by_ip_port;
   // (pid, sockfd) -> DataInfo
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)

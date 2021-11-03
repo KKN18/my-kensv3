@@ -110,15 +110,19 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   in_port_t local_port;
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
 
-  auto iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
-  if(iter == pid_sockfd_by_ip_port.end())
+  auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+  if(iter == estab_pid_sockfd_by_ip_port.end())
   {
-      iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
-      if (iter == pid_sockfd_by_ip_port.end())
-      {
-        return;
-        // assert(0);
-      }
+    iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
+    if(iter == pid_sockfd_by_ip_port.end())
+    {
+        iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+        if (iter == pid_sockfd_by_ip_port.end())
+        {
+          return;
+          // assert(0);
+        }
+    }
   }
 
   auto iter2 = sockets.find({iter->second.first, iter->second.second});
@@ -161,10 +165,14 @@ ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf
   if(FUNCTION_LOG) {
     // printf("(pid: %d) syscall_read\n", pid);
   }
+
   Socket s = sockets[{pid, fd}];
+  s.is_rcvd_data = false;
+
   if (s.is_rcvd_data){
       memcpy(buf, s.receive_buffer, count);
-      this->returnSystemCall(syscallUUID, fd);
+      s.is_rcvd_data = false;
+      this->returnSystemCall(syscallUUID, count);
       return count;
   }
   else {
@@ -411,6 +419,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.isBound = true;
   new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
   new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+  new_socket.is_rcvd_data = false;
+  new_socket.receive_ptr = new_socket.receive_buffer;
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
 
@@ -605,7 +615,6 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
   uint8_t flag = received_info.flag;
-  uint32_t seq_num = received_info.seq_num;
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
@@ -677,6 +686,52 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
 
 void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 {
+  DataInfo received_info;
+  read_packet_header(packet, &received_info);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  printf(" in ESTAB_STATE\n");
+  // (1) Copy the payload
+  socket->is_rcvd_data = true;
+
+  uint8_t ihl;
+  uint16_t total_length;
+  packet->readData(IP_START, &ihl, 1);
+  ihl = ntohs(ihl & 31);
+  packet->readData(IP_START + 2, &total_length, 2);
+  total_length = ntohs(total_length);
+
+  uint8_t data_ofs;
+  packet->readData(TCP_START + 12, &data_ofs, 1);
+  data_ofs = ntohs(data_ofs & 224);
+
+  uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+  printf("Data length %d\n", data_length);
+
+  packet->readData(TCP_START + data_ofs, socket->receive_ptr, data_length);
+  socket->receive_ptr += data_length;
+
+  auto iter = blocked_io_table.find({socket->pid, socket->fd});
+  if (iter != blocked_io_table.end()) {
+    auto &p = iter->second;
+    memcpy(p.buf, socket->receive_buffer, data_length);
+    this->returnSystemCall(p.syscallUUID, data_length);
+  }
+  // (2) Acknowledge received packet
+  DataInfo info;
+  info.local_addr = unit_addr(local_ip, local_port);
+  info.remote_addr = unit_addr(remote_ip, remote_port);
+  info.seq_num = ack_num; info.ack_num = seq_num + data_length;
+  info.flag = ACK;
+
+  Packet new_packet(HEADER_SIZE);
+  write_packet_header(&new_packet, &info);
+  sendPacket("IPv4", std::move(new_packet));
   return;
 }
 

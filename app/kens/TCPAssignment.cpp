@@ -104,7 +104,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   assert(fromModule == "IPv4");
 
   DataInfo received_info;
-
   read_packet_header(&packet, &received_info);
   
   in_addr_t local_ip;
@@ -128,23 +127,24 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 	switch(s.state)
 	{
 		case INIT_STATE:
-      manage_init(&packet);
+      manage_init(&packet, &s);
 			break;
 		case LISTEN_STATE:
-      manage_listen(&packet);
+      manage_listen(&packet, &s);
       break;
 		case SYN_SENT_STATE: 
-      manage_synsent(&packet);
+      manage_synsent(&packet, &s);
       break;
 		case SYN_RCVD_STATE:
-      manage_synrcvd(&packet);
+      manage_synrcvd(&packet, &s);
       break;
     case ESTAB_STATE:
-      manage_estab(&packet); 
+      manage_estab(&packet, &s); 
       break;
 		default:
 			assert(0);
 	}
+  return;
 }
 
 void TCPAssignment::timerCallback(std::any payload) {
@@ -495,27 +495,56 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 }
 
 /* Packet Handling Functions */
-void manage_init(Packet *packet) 
+void manage_init(Packet *packet, Socket *socket) 
 {
   return;
 }
-void manage_listen(Packet *packet)
+
+void manage_listen(Packet *packet, Socket *socket)
+{
+  DataInfo received_info;
+  read_packet_header(packet, &received_info);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t flag = received_info.flag;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  if(!(flag & SYN)) return;
+  
+  DataInfo info;
+  info.local_addr = unit_addr(local_ip, local_port);
+  info.remote_addr = unit_addr(remote_ip, remote_port);
+  info.seq_num = rand(); info.ack_num = seq_num + 1;
+  info.flag = SYN | ACK;
+
+  write_packet_header(&new_packet, &info);
+  data_infos[{pid, fd}] = info;
+  sendPacket("IPv4", std::move(new_packet));
+
+  socket.state = SYN_RCVD_STATE;
+
+  return;
+}
+
+void manage_synsent(Packet *packet, Socket *socket)
 {
   return;
 }
-void manage_synsent(Packet *packet)
+
+void manage_synrcvd(Packet *packet, Socket *socket)
 {
   return;
 }
-void manage_synrcvd(Packet *packet)
+
+void manage_estab(Packet *packet, Socket *socket)
 {
   return;
 }
-void manage_estab(Packet *packet)
-{
-  return;
-}
-void manage_fin(Packet *packet)
+
+void manage_fin(Packet *packet, Socket *socket)
 {
   return;
 }

@@ -131,12 +131,12 @@ public:
 		int sockfd, int backlog);
 
   /* Packet Managing Functions */
-  void manage_init(Packet *packet);
-  void manage_listen(Packet *packet);
-  void manage_synsent(Packet *packet);
-  void manage_synrcvd(Packet *packet);
-  void manage_estab(Packet *packet);
-  void manage_fin(Packet *packet);
+  void manage_init(Packet *packet, Socket *socket);
+  void manage_listen(Packet *packet, Socket *socket);
+  void manage_synsent(Packet *packet, Socket *socket);
+  void manage_synrcvd(Packet *packet, Socket *socket);
+  void manage_estab(Packet *packet, Socket *socket);
+  void manage_fin(Packet *packet, Socket *socket);
 
   /* Utility Functions For Packet Manipulation */
 

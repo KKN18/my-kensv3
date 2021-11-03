@@ -113,7 +113,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint32_t seq_num = received_info.seq_num;
   uint32_t ack_num = received_info.ack_num;
   uint8_t header_length = received_info.header_length;
-
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 

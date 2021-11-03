@@ -103,6 +103,8 @@ private:
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
+  // (ip, port) -> (pid, sockfd)
+  std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> estab_pid_sockfd_by_ip_port;
   // (pid, sockfd) -> DataInfo
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
@@ -134,26 +136,26 @@ public:
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
 
-    // Utility Functions
-    std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+  // Utility Functions
+  std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
 
-    sockaddr unit_addr(in_addr_t ip, in_port_t port);
+  sockaddr unit_addr(in_addr_t ip, in_port_t port);
 
-    void read_packet_header(Packet *packet, DataInfo *c);
+  void read_packet_header(Packet *packet, DataInfo *c);
 
-    void write_packet_header(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      in_addr_t local_ip, in_addr_t remote_ip,
-      in_port_t local_port, in_port_t remote_port);
+  void write_packet_header(Packet *new_packet,
+    size_t ip_start, size_t tcp_start,
+    in_addr_t local_ip, in_addr_t remote_ip,
+    in_port_t local_port, in_port_t remote_port);
 
-    void write_packet_response(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
-      in_addr_t local_ip, in_addr_t remote_ip);
+  void write_packet_response(Packet *new_packet,
+    size_t ip_start, size_t tcp_start,
+    uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
+    in_addr_t local_ip, in_addr_t remote_ip);
 
-    void write_packet_header_mod(Packet *new_packet, DataInfo *c);
+  void write_packet_header_mod(Packet *new_packet, DataInfo *c);
 
-    void write_packet_response_mod(Packet *new_packet, DataInfo *sc, DataInfo *rc);
+  void write_packet_response_mod(Packet *new_packet, DataInfo *sc, DataInfo *rc);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

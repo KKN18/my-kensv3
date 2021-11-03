@@ -43,10 +43,6 @@ void TCPAssignment::finalize() {}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
-  // if(FUNCTION_LOG) {
-  //   printf("(pid: %d) systemCallback\n", pid);
-  // }
-
   switch (param.syscallNumber) {
   case SOCKET:
     this->syscall_socket(syscallUUID, pid, param.param1_int, param.param2_int, param.param3_int);
@@ -105,6 +101,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
 
   DataInfo received_info;
+  
 
   read_packet_header(&packet, &received_info);
   in_addr_t local_ip, remote_ip;
@@ -117,14 +114,18 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
-  auto iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
-  if(iter == pid_sockfd_by_ip_port.end())
+  auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+  if(iter == estab_pid_sockfd_by_ip_port.end())
   {
-      iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
-      if (iter == pid_sockfd_by_ip_port.end())
-      {
-        return;
-      }
+    iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
+    if(iter == pid_sockfd_by_ip_port.end())
+    {
+        iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+        if (iter == pid_sockfd_by_ip_port.end())
+        {
+          return;
+        }
+    }
   }
 
   int pid, fd;
@@ -141,7 +142,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   auto &s = iter2->second;
 
-  assert(pid == s.pid);
+  // assert(pid == s.pid);
 
   /* Write Packet START */
 	Packet new_packet(HEADER_SIZE);
@@ -319,10 +320,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             new_socket.state = ESTAB_STATE;
             new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
             new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+            new_socket.is_rcvd_data = false;
+            new_socket.receive_ptr = new_socket.receive_buffer;
 
             *process.addr = info.local_addr;
             *process.addrlen = sizeof(info.local_addr);
 
+            estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {pid, new_fd};
             sockets[{pid, new_fd}] = new_socket;
 
 						this->returnSystemCall(process.syscallUUID, new_fd);
@@ -355,6 +359,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     copy the payload to the corresponding TCP socket’s receive buffer
     acknowledge received packet (i.e., send an ACK packet)
     */
+      printf(" in ESTAB_STATE\n");
       // (1) Copy the payload
       s.is_rcvd_data = true;
 
@@ -370,6 +375,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       data_ofs = ntohs(data_ofs & 224);
 
       uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+      printf("Data length %d\n", data_length);
 
       packet.readData(TCP_START + data_ofs, s.receive_ptr, data_length);
       s.receive_ptr += data_length;
@@ -377,8 +383,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       auto iter = blocked_io_table.find({pid, fd});
       if (iter != blocked_io_table.end()) {
         auto &p = iter->second;
-        memcpy(p.buf, s.receive_buffer, p.count);
-        this->returnSystemCall(p.syscallUUID, p.fd);
+        memcpy(p.buf, s.receive_buffer, data_length);
+        this->returnSystemCall(p.syscallUUID, data_length);
       }
       // (2) Acknowledge received packet
       DataInfo info;
@@ -425,9 +431,11 @@ ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf
     // printf("(pid: %d) syscall_read\n", pid);
   }
   Socket s = sockets[{pid, fd}];
+  s.is_rcvd_data = false;
   if (s.is_rcvd_data){
       memcpy(buf, s.receive_buffer, count);
-      this->returnSystemCall(syscallUUID, fd);
+      s.is_rcvd_data = false;
+      this->returnSystemCall(syscallUUID, count);
       return count;
   }
   else {
@@ -752,10 +760,14 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.isBound = true;
   new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
   new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+  new_socket.is_rcvd_data = false;
+  new_socket.receive_ptr = new_socket.receive_buffer;
+
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
 
   sockets[{pid, fd}] = new_socket;
+  estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {pid, fd};
 
   this->returnSystemCall(syscallUUID, fd);
 }

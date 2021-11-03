@@ -147,6 +147,10 @@ public:
   // Read and Write Packet Header
   void read_packet_header(Packet *packet, DataInfo *c);
   void write_packet_header(Packet *new_packet, DataInfo *c);
+  void write_packet_header_mod(Packet *new_packet,
+    size_t ip_start, size_t tcp_start,
+    in_addr_t local_ip, in_addr_t remote_ip,
+    in_port_t local_port, in_port_t remote_port);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

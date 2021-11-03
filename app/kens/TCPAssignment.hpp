@@ -31,11 +31,7 @@ namespace E {
 
   typedef struct _DataInfo
 	{
-    in_addr_t local_ip;
-    in_port_t local_port;
     sockaddr local_addr;
-    in_addr_t remote_ip;
-    in_port_t remote_port;
     sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
@@ -116,7 +112,7 @@ public:
   virtual void finalize();
   virtual ~TCPAssignment();
 
-  // Our Implementation
+  /* System Calls */
   ssize_t syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
   ssize_t syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
   void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
@@ -134,26 +130,23 @@ public:
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
 
-    // Utility Functions
-    std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+  /* Packet Managing Functions */
+  void manage_init(Packet *packet);
+  void manage_listen(Packet *packet);
+  void manage_synsent(Packet *packet);
+  void manage_synrcvd(Packet *packet);
+  void manage_estab(Packet *packet);
+  void manage_fin(Packet *packet);
 
-    sockaddr unit_addr(in_addr_t ip, in_port_t port);
+  /* Utility Functions For Packet Manipulation */
 
-    void read_packet_header(Packet *packet, DataInfo *c);
+  // Generate or Read SockAddr
+  std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+  sockaddr unit_addr(in_addr_t ip, in_port_t port);
 
-    void write_packet_header(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      in_addr_t local_ip, in_addr_t remote_ip,
-      in_port_t local_port, in_port_t remote_port);
-
-    void write_packet_response(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
-      in_addr_t local_ip, in_addr_t remote_ip);
-
-    void write_packet_header_mod(Packet *new_packet, DataInfo *c);
-
-    void write_packet_response_mod(Packet *new_packet, DataInfo *sc, DataInfo *rc);
+  // Read and Write Packet Header
+  void read_packet_header(Packet *packet, DataInfo *c);
+  void write_packet_header(Packet *new_packet, DataInfo *c);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

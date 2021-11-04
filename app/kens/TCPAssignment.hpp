@@ -35,7 +35,9 @@ namespace E {
     sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
-    uint8_t header_length;
+    uint8_t ihl;
+    uint16_t total_length;
+    uint8_t data_ofs;
     uint8_t flag;
 	} DataInfo;
 
@@ -52,6 +54,7 @@ namespace E {
     bool isBound;
     sockaddr addr;
     socklen_t addrlen;
+    uint16_t window;
 
     // State
     enum TCP_STATE state;
@@ -63,12 +66,19 @@ namespace E {
 		std::queue<DataInfo> *acceptQueue;
     unsigned int backlog;
 
-    // For read, write
+    /* For Receiver */
     char *receive_buffer;
-    char *receive_ptr;
+    // pakcets
+    char *packet_ptr;
+    // within one packet
+    char *data_ptr;
+    size_t remaining;
     bool is_rcvd_data;
+
+    /* For Sender */
     char *send_buffer;
     bool enough_send_space;
+
   } Socket;
 
   typedef struct _Process

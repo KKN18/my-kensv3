@@ -59,8 +59,9 @@ namespace E {
     // State
     enum TCP_STATE state;
 
-    // For client
-    sockaddr connect_addr;
+    // Addr Info after 3-way handshake
+    sockaddr remote_addr;
+    sockaddr local_addr;
 
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;

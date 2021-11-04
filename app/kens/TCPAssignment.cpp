@@ -211,9 +211,20 @@ ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const vo
     if(s.send_ptr - s.acked_ptr < s.window){
       memcpy(s.send_ptr, buf, count);
       s.send_ptr += count;
-      Packet packet(HEADER_SIZE+count);
       DataInfo info;
-      info.local_addr = u
+      info.local_addr = s.local_addr;
+      info.remote_addr = s.remote_addr;
+      info.seq_num = s.seq_num; info.ack_num = 1;
+
+      Packet packet(HEADER_SIZE + count);
+      write_packet_header(&packet, &info);
+
+      uint16_t size = count;
+      uint8_t buf = size >> 8;
+      packet.writeData(IP_START + 2, &buf, 1);
+      buf = (uint8_t)(size & 0xFF);
+      packet.writeData(IP_START + 3, &buf, 1);
+
     }
 
     // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
@@ -224,7 +235,7 @@ ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const vo
   // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
   else
   {
-    
+
   }
   return;
 }
@@ -310,7 +321,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   blocked_process_table[pid] = p;
 
   auto &s = iter->second;
-  s.connect_addr = *addr;
+  s.remote_addr = *addr;
 
   in_addr_t remote_ip, local_ip;
   in_port_t remote_port, local_port;
@@ -464,6 +475,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
 
+  new_socket.local_addr = info.local_addr;
+  new_socket.remote_addr = info.remote_addr;
   sockets[{pid, fd}] = new_socket;
   estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {pid, fd};
 
@@ -550,8 +563,8 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	auto &s = sockets[{pid, sockfd}];
-  *addr = s.connect_addr;
-  *addrlen = sizeof(s.connect_addr);
+  *addr = s.remote_addr;
+  *addrlen = sizeof(s.remote_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -640,6 +653,7 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     assert(0);
   }
 
+
   return;
 }
 
@@ -708,6 +722,8 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
 
+    new_socket.local_addr = info.local_addr;
+    new_socket.remote_addr = info.remote_addr;
     estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {socket->pid, new_fd};
     sockets[{socket->pid, new_fd}] = new_socket;
 
@@ -751,6 +767,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
+  socket->remote_addr = received_info.remote_addr;
+  socket->local_addr = received_info.local_addr;
 
   uint16_t data_length = total_length - (ihl + data_ofs) * 4;
   int data_start = TCP_START + data_ofs * 4;

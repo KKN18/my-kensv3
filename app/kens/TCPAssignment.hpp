@@ -77,7 +77,15 @@ namespace E {
 
     /* For Sender */
     char *send_buffer;
+    // packets ptr
+    char *send_ptr;
+    // recently acked packet ptr
+    char *acked_ptr;
+    size_t send_remaining;
     bool enough_send_space;
+    uint32_t seq_num;
+
+    std::queue<uint32_t> *seqnumQueue;
 
   } Socket;
 

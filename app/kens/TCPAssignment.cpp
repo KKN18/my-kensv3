@@ -202,15 +202,29 @@ ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const vo
   this->returnSystemCall(syscallUUID, fd);
   return count;
 
-  Socket s = sockets[{pid, fd}];
-  if(s.enough_send_space)
-  {
+  Socket &s = sockets[{pid, fd}];
 
-    // if(data lies in sender window)
+  // (1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer.
+  if(s.send_remaining >= count)
+  {
+    // (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
+    if(s.send_ptr - s.acked_ptr < s.window){
+      memcpy(s.send_ptr, buf, count);
+      s.send_ptr += count;
+      Packet packet(HEADER_SIZE+count);
+      DataInfo info;
+      info.local_addr = u
+    }
+
+    // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
+
+
   }
+  // (2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data.
+  // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
   else
   {
-
+    
   }
   return;
 }
@@ -242,6 +256,9 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.remaining = 0;
   // Fixed window size
   s.window = 51200;
+  s.seq_num = 1;
+  s.send_ptr = s.send_buffer;
+  s.ack_ptr = s.send_buffer;
 
   sockets[{pid, fd}] = s;
 
@@ -440,6 +457,9 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.data_ptr = new_socket.receive_buffer;
   new_socket.remaining = 0;
   new_socket.window = 51200;
+  new_socekt.seq_num = 1;
+  new_socket.send_ptr = new_socket.send_buffer;
+  new_socket.ack_ptr = new_socket.send_buffer;
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -681,6 +701,9 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.packet_ptr = new_socket.receive_buffer;
     new_socket.remaining = 0;
     new_socket.window = 51200;
+    new_socket.seq_num = 1;
+    new_socket.send_ptr = new_socket.send_buffer;
+    new_socket.ack_ptr = new_socket.send_buffer;
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -774,8 +797,11 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   else
   {
     // (1) free the send buffer space allocated for acked data
+
     // (2) move the sender window (the number of in-flight bytes should be decreased)
+
     // (3) adjust the sender window size (from advertised receive buffer size)
+
     // (4) send data if there is waiting data in the send buffer and if the data is sendable (i.e., there is room in sender’s window)
   }
 

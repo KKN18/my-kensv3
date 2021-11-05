@@ -171,10 +171,11 @@ ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf
   Socket &s = sockets[{pid, fd}];
 
   if (s.is_rcvd_data){
-      IOProcess &p = blocked_io_table[{pid, fd}];
+      IOProcess &p = blocked_read_table[{pid, fd}];
 
       if(s.remaining == 0) {
           s.is_rcvd_data = false;
+          // blocked_read_table.erase(std::pair<in_addr_t, in_port_t>(pid, fd));
           this->returnSystemCall(syscallUUID, 0);
           return 0;
       }
@@ -192,25 +193,81 @@ ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf
       read_p.buf = buf;
       read_p.count = count;
       read_p.syscallUUID = syscallUUID;
-      blocked_io_table[{pid, fd}] = read_p;
+      blocked_read_table[{pid, fd}] = read_p;
       return count;
   }
 }
 
 ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count)
 {
-  this->returnSystemCall(syscallUUID, fd);
-  return count;
+  if(FUNCTION_LOG) {
+    printf("(pid: %d) syscall_write\n", pid);
+  }
 
   Socket &s = sockets[{pid, fd}];
+
+  // if(s.state != ESTAB_STATE)
+  // {
+  //   ASSERT(0);
+  //   IOProcess p;
+  //   p.fd = fd;
+  //   p.buf = buf;
+  //   p.count =  count;
+  //   p.syscallUUID = syscallUUID;
+  //   blocked_write_table[{pid, fd}] = p;
+  //   return count;
+  // }
 
   // (1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer.
   if(s.send_remaining >= count)
   {
     // (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
-    if(s.send_ptr - s.acked_ptr < s.window){
+    if(s.send_ptr - s.acked_ptr < s.window)
+    {
       memcpy(s.send_ptr, buf, count);
+      // Write Header
+      DataInfo info;
+      info.local_addr = s.local_addr;
+      info.remote_addr = s.remote_addr;
+      info.seq_num = s.seq_num; info.ack_num = 1;
+      info.flag = ACK;
+
+      Packet packet(HEADER_SIZE + count);
+      write_packet_header(&packet, &info);
+
+      // Write total_length and payload
+      uint16_t size = count + 4 * (5 + 5);
+      uint8_t total_length = size >> 8;
+      packet.writeData(IP_START + 2, &total_length, 1);
+      total_length = (uint8_t)(size & 0xFF);
+      packet.writeData(IP_START + 3, &total_length, 1);
+
+      packet.writeData(TCP_START + 20, s.send_ptr, count);
       s.send_ptr += count;
+
+      sendPacket("IPv4", std::move(packet));
+
+      this->returnSystemCall(syscallUUID, -1);
+      return -1;
+    }
+    // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
+    else
+    {
+      // Is return value -1 or 0?
+      this->returnSystemCall(syscallUUID, 0);
+      return 0;
+    }
+  }
+  // (2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data.
+  // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
+  else
+  {
+    // Block
+    // (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
+    if(s.send_ptr - s.acked_ptr < s.window)
+    {
+      memcpy(s.send_ptr, buf, count);
+      // Write Header
       DataInfo info;
       info.local_addr = s.local_addr;
       info.remote_addr = s.remote_addr;
@@ -219,25 +276,30 @@ ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const vo
       Packet packet(HEADER_SIZE + count);
       write_packet_header(&packet, &info);
 
-      uint16_t size = count;
-      uint8_t buf = size >> 8;
-      packet.writeData(IP_START + 2, &buf, 1);
-      buf = (uint8_t)(size & 0xFF);
-      packet.writeData(IP_START + 3, &buf, 1);
+      // Write total_length and payload
+      uint16_t size = count + 4 * (5 + 5);
+      uint8_t total_length = size >> 8;
+      packet.writeData(IP_START + 2, &total_length, 1);
+      total_length = (uint8_t)(size & 0xFF);
+      packet.writeData(IP_START + 3, &total_length, 1);
 
+      packet.writeData(TCP_START + 20, s.send_ptr, count);
+      s.send_ptr += count;
+
+      this->returnSystemCall(syscallUUID, count);
+      return count;
     }
-
     // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
-
-
+    else
+    {
+      // Is return value -1 or 0?
+      this->returnSystemCall(syscallUUID, 0);
+      return 0;
+    }
   }
-  // (2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data.
-  // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
-  else
-  {
 
-  }
-  return;
+  // Not Reached
+  assert(0);
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol)
@@ -269,7 +331,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.window = 51200;
   s.seq_num = 1;
   s.send_ptr = s.send_buffer;
-  s.ack_ptr = s.send_buffer;
+  s.acked_ptr = s.send_buffer;
 
   sockets[{pid, fd}] = s;
 
@@ -468,9 +530,9 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.data_ptr = new_socket.receive_buffer;
   new_socket.remaining = 0;
   new_socket.window = 51200;
-  new_socekt.seq_num = 1;
+  new_socket.seq_num = 1;
   new_socket.send_ptr = new_socket.send_buffer;
-  new_socket.ack_ptr = new_socket.send_buffer;
+  new_socket.acked_ptr = new_socket.send_buffer;
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -639,6 +701,10 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     write_packet_header(&new_packet, &info);
     sendPacket("IPv4", std::move(new_packet));
 
+    // Send first payload here
+    socket->remote_addr = received_info.remote_addr;
+    socket->local_addr = received_info.local_addr;
+
     if(flag & ACK) socket->state = ESTAB_STATE;
     else socket->state = SYN_RCVD_STATE;
 
@@ -717,7 +783,7 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.window = 51200;
     new_socket.seq_num = 1;
     new_socket.send_ptr = new_socket.send_buffer;
-    new_socket.ack_ptr = new_socket.send_buffer;
+    new_socket.acked_ptr = new_socket.send_buffer;
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -784,8 +850,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     socket->packet_ptr += data_length;
     socket->remaining += data_length;
 
-    auto iter = blocked_io_table.find({socket->pid, socket->fd});
-    if (iter != blocked_io_table.end()) {
+    auto iter = blocked_read_table.find({socket->pid, socket->fd});
+    if (iter != blocked_read_table.end()) {
       auto &p = iter->second;
 
       if(p.count < data_length)
@@ -814,6 +880,12 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle ACK packet
   else
   {
+    auto iter = blocked_write_table.find({socket->pid, socket->fd});
+    if (iter != blocked_read_table.end()) {
+      auto &p = iter->second;
+
+      this->returnSystemCall(p.syscallUUID, 0);
+    }
     // (1) free the send buffer space allocated for acked data
 
     // (2) move the sender window (the number of in-flight bytes should be decreased)
@@ -896,8 +968,8 @@ void TCPAssignment::write_packet_header(Packet *new_packet, DataInfo *info)
 	uint16_t port_msg, remote_port_msg, checksum, checksum_converted;
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
-  uint8_t tcp_data[DATA_OFS];
-  uint8_t header_length = 80;
+  uint8_t tcp_header[DATA_OFS];
+  uint8_t data_ofs = 5 << 4;
 	uint16_t window = htons(51200);
 
   std::tie(local_ip, local_port) = divide_addr(info->local_addr);
@@ -906,6 +978,10 @@ void TCPAssignment::write_packet_header(Packet *new_packet, DataInfo *info)
   remote_ip_msg = htonl(remote_ip); remote_port_msg = htons(remote_port);
   seq_num = htonl(info->seq_num); ack_num = htonl(info->ack_num);
 
+  uint8_t ver_and_ihl = 4 << 4; // IPv4
+  ver_and_ihl += 5; // ihl = 5
+
+  new_packet->writeData(IP_START, &ver_and_ihl, 1);
 	new_packet->writeData(IP_START + 12, &ip_msg, 4);
 	new_packet->writeData(IP_START + 16, &remote_ip_msg, 4);
 
@@ -913,13 +989,13 @@ void TCPAssignment::write_packet_header(Packet *new_packet, DataInfo *info)
 	new_packet->writeData(TCP_START + 2, &remote_port_msg, 2);
   new_packet->writeData(TCP_START + 4, &seq_num, 4);
   new_packet->writeData(TCP_START + 8, &ack_num, 4);
-	new_packet->writeData(TCP_START + 12, &header_length, 1);
+	new_packet->writeData(TCP_START + 12, &data_ofs, 1);
   new_packet->writeData(TCP_START + 13, &(info->flag), 1);
 	new_packet->writeData(TCP_START + 14, &window, 2);
 
   // Checksum Calculation
-  new_packet->readData(TCP_START, tcp_data, DATA_OFS);
-  checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS);
+  new_packet->readData(TCP_START, tcp_header, DATA_OFS);
+  checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_header, DATA_OFS);
   checksum_converted = htons(checksum);
   new_packet->writeData(TCP_START + 16, &checksum_converted, 2);
 

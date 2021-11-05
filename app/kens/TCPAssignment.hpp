@@ -82,6 +82,7 @@ namespace E {
     char *send_ptr;
     // recently acked packet ptr
     char *acked_ptr;
+
     size_t send_remaining;
     bool enough_send_space;
     uint32_t seq_num;
@@ -122,8 +123,11 @@ private:
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> blocked_process_table;
-  // (pid, fd) -> (IOProcess) (Note: ONLY BLOCKED PROCESS IS HERE)
-  std::map<std::pair<int, int>, IOProcess> blocked_io_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY READ BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, IOProcess> blocked_read_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, IOProcess> blocked_write_table;
+
 
 public:
   TCPAssignment(Host &host);

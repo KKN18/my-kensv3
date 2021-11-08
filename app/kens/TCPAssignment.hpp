@@ -82,8 +82,9 @@ namespace E {
     size_t send_remaining;
     bool enough_send_space;
     uint32_t seq_num;
+    uint32_t remote_seq_num;
 
-    std::queue<uint32_t> *seqnumQueue;
+    std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
 
   } Socket;
 
@@ -94,13 +95,21 @@ namespace E {
 		UUID syscallUUID;
   } Process;
 
-  typedef struct _IOProcess
+  typedef struct _ReadProcess
   {
     int fd;
     void *buf;
     size_t count;
     UUID syscallUUID;
-  } IOProcess;
+  } ReadProcess;
+
+  typedef struct _WriteProcess
+  {
+    int fd;
+    const void *buf;
+    size_t count;
+    UUID syscallUUID;
+  } WriteProcess;
 
 class TCPAssignment : public HostModule,
                       private RoutingInfoInterface,
@@ -120,9 +129,9 @@ private:
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> blocked_process_table;
   // (pid, fd) -> (IOProcess) (Note: ONLY READ BLOCKED PROCESS IS HERE)
-  std::map<std::pair<int, int>, IOProcess> blocked_read_table;
+  std::map<std::pair<int, int>, ReadProcess> blocked_read_table;
   // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
-  std::map<std::pair<int, int>, IOProcess> blocked_write_table;
+  std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
 
 
 public:

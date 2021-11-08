@@ -132,8 +132,6 @@ protected:
                          remaining)) >= 0) {
           total_size += read_byte;
           remaining -= read_byte;
-          printf("read byte: %d\n", read_byte);
-          printf("remaining: %d\n", remaining);
           EXPECT_GE(remaining, 0);
           if (remaining == 0)
             break;

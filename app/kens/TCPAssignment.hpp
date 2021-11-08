@@ -57,7 +57,7 @@ namespace E {
     sockaddr local_addr;
     // Remote addr Info after 3-way handshake
     sockaddr remote_addr;
-
+    bool is_connected;
 
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;

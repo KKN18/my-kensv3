@@ -329,6 +329,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.packet_ptr = s.receive_buffer;
   s.data_ptr = s.receive_buffer;
   s.remaining = 0;
+  s.is_connected = false;
   // Fixed window size
   s.window = 51200;
   s.seq_num = 1;
@@ -351,17 +352,25 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
   auto &s = iter->second;
 
-  in_addr_t local_ip;
-  in_port_t local_port;
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
 
   std::tie(local_ip, local_port) = divide_addr(s.local_addr);
+
+  // For cases where s.remote_addr is uninitialized
+  if(s.is_connected)
+  {
+    std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
+    estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
+  }
+
+  pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
 
   // Free malloced memory in syscall_socket
   free(s.receive_buffer);
   free(s.send_buffer);
 
   sockets.erase(iter);
-  pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
 
 	this->removeFileDescriptor(pid, fd);
 	this->returnSystemCall(syscallUUID, 0);
@@ -401,7 +410,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   sscanf(remote_ip_buffer, "%c.%c.%c.%c", &converted_remote_ip[0],
     &converted_remote_ip[1], &converted_remote_ip[2], &converted_remote_ip[3]);
 
-  if (!s.isBound){
+  if (!s.isBound) {
   	int table_port = getRoutingTable(converted_remote_ip);
     std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
     assert(local_ip_array.has_value() == true);
@@ -431,8 +440,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
     s.local_addr = unit_addr(local_ip, local_port);
   }
   else {
-    local_ip = s.ip;
-    local_port = s.port;
+    std::tie(local_ip, local_port) = divide_addr(s.local_addr);
   }
 
   in_addr_t local_ip_converted = htonl(local_ip);
@@ -459,7 +467,9 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   packet.writeData(TCP_START + 16, &checksum_converted, 2);
   /* Writing packet finished */
   sendPacket("IPv4", std::move(packet));
+
   s.state = SYN_SENT_STATE;
+
   return;
 }
 
@@ -517,9 +527,9 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   s.acceptQueue->pop();
 
   Socket new_socket;
-  in_addr_t remote_ip;
-  in_port_t remote_port;
-  std::tie(new_socket.ip, new_socket.port) = divide_addr(info.local_addr);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  std::tie(local_ip, local_port) = divide_addr(info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(info.remote_addr);
 
   new_socket.isBound = true;
@@ -535,6 +545,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.acked_ptr = new_socket.send_buffer;
   new_socket.local_addr = info.local_addr;
   new_socket.remote_addr = info.remote_addr;
+  new_socket.is_connected = true;
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -702,7 +713,12 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     socket->remote_addr = received_info.remote_addr;
     socket->local_addr = received_info.local_addr;
 
-    if(flag & ACK) socket->state = ESTAB_STATE;
+    if(flag & ACK) {
+      socket->state = ESTAB_STATE;
+      socket->is_connected = true;
+
+      estab_pid_sockfd_by_ip_port[{remote_ip, remote_port}] = {socket->pid, socket->fd};
+    }
     else socket->state = SYN_RCVD_STATE;
 
     auto iter = blocked_process_table.find(socket->pid);
@@ -766,9 +782,9 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     assert(new_fd >= 0);
 
     Socket new_socket;
-    in_addr_t remote_ip;
-    in_port_t remote_port;
-    std::tie(new_socket.ip, new_socket.port) = divide_addr(info.local_addr);
+    in_addr_t local_ip, remote_ip;
+    in_port_t local_port, remote_port;
+    std::tie(local_ip, local_port) = divide_addr(info.local_addr);
     std::tie(remote_ip,remote_port) = divide_addr(info.remote_addr);
 
     new_socket.isBound = true;
@@ -785,6 +801,7 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.acked_ptr = new_socket.send_buffer;
     new_socket.local_addr = info.local_addr;
     new_socket.remote_addr = info.remote_addr;
+    new_socket.is_connected = true;
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -1006,6 +1023,10 @@ void TCPAssignment::write_packet_header_mod(Packet *new_packet,
   in_addr_t local_ip, in_addr_t remote_ip,
   in_port_t local_port, in_port_t remote_port)
 {
+  uint8_t ver_and_ihl = 4 << 4; // IPv4
+  ver_and_ihl += 5; // ihl = 5
+  new_packet->writeData(IP_START, &ver_and_ihl, 1);
+
   uint32_t ip_msg;
 	uint16_t port_msg;
   ip_msg = htonl(local_ip);
@@ -1019,7 +1040,7 @@ void TCPAssignment::write_packet_header_mod(Packet *new_packet,
 	new_packet->writeData(tcp_start + 2, &port_msg, 2);
 
   // Can new_data_ofs_ns and window_size change?
-	uint8_t data_ofs = DATA_OFS;
+	uint8_t data_ofs = 5 << 4;
 	uint16_t window = htons(51200);
 	new_packet->writeData(tcp_start + 12, &data_ofs, 1);
 	new_packet->writeData(tcp_start + 14, &window, 2);

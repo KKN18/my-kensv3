@@ -45,23 +45,19 @@ namespace E {
   {
     int pid;
     int fd;
-
     int type;
     int protocol;
-    in_addr_t ip;
-    in_port_t port;
 
     bool isBound;
-    sockaddr addr;
-    socklen_t addrlen;
     uint16_t window;
 
     // State
     enum TCP_STATE state;
 
-    // Addr Info after 3-way handshake
-    sockaddr remote_addr;
     sockaddr local_addr;
+    // Remote addr Info after 3-way handshake
+    sockaddr remote_addr;
+
 
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;

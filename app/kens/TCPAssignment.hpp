@@ -82,7 +82,7 @@ namespace E {
     size_t send_remaining;
     bool enough_send_space;
     uint32_t seq_num;
-    uint32_t remote_seq_num;
+    uint32_t ack_num;
 
     std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
 
@@ -141,8 +141,8 @@ public:
   virtual ~TCPAssignment();
 
   /* System Calls */
-  ssize_t syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
-  ssize_t syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
+  void syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
+  void syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
   void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
 	void syscall_close(UUID syscallUUID, int pid, int fd);
 	void syscall_bind(UUID syscallUUID, int pid,
@@ -175,6 +175,7 @@ public:
   // Read and Write Packet Header
   void read_packet_header(Packet *packet, DataInfo *c);
   void write_packet_header(Packet *new_packet, DataInfo *c);
+  void write_packet_header_without_checksum(Packet *new_packet, DataInfo *info);
   void write_packet_header_mod(Packet *new_packet,
     size_t ip_start, size_t tcp_start,
     in_addr_t local_ip, in_addr_t remote_ip,

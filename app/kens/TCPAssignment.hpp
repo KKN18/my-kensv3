@@ -31,15 +31,13 @@ namespace E {
 
   typedef struct _DataInfo
 	{
-    in_addr_t local_ip;
-    in_port_t local_port;
     sockaddr local_addr;
-    in_addr_t remote_ip;
-    in_port_t remote_port;
     sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
-    uint8_t header_length;
+    uint8_t ihl;
+    uint16_t total_length;
+    uint8_t data_ofs;
     uint8_t flag;
 	} DataInfo;
 
@@ -47,34 +45,47 @@ namespace E {
   {
     int pid;
     int fd;
-
     int type;
     int protocol;
-    // uint32_t ip;
-    // int port;
-    in_addr_t ip;
-    in_port_t port;
 
     bool isBound;
-    sockaddr addr;
-    socklen_t addrlen;
+    uint16_t window;
 
     // State
     enum TCP_STATE state;
 
-    // For client
-    sockaddr connect_addr;
+    sockaddr local_addr;
+    // Remote addr Info after 3-way handshake
+    sockaddr remote_addr;
+    bool is_connected;
 
     std::queue<Packet> *listenQueue;
 		std::queue<DataInfo> *acceptQueue;
     unsigned int backlog;
 
-    // For read, write
+    /* For Receiver */
     char *receive_buffer;
-    char *receive_ptr;
+    // pakcets
+    char *packet_ptr;
+    // within one packet
+    char *data_ptr;
+    size_t remaining;
     bool is_rcvd_data;
+
+    /* For Sender */
     char *send_buffer;
+    // packets ptr
+    char *send_ptr;
+    // recently acked packet ptr
+    char *acked_ptr;
+
+    size_t send_remaining;
     bool enough_send_space;
+    uint32_t seq_num;
+    uint32_t ack_num;
+
+    std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
+
   } Socket;
 
   typedef struct _Process
@@ -84,13 +95,21 @@ namespace E {
 		UUID syscallUUID;
   } Process;
 
-  typedef struct _IOProcess
+  typedef struct _ReadProcess
   {
     int fd;
     void *buf;
     size_t count;
     UUID syscallUUID;
-  } IOProcess;
+  } ReadProcess;
+
+  typedef struct _WriteProcess
+  {
+    int fd;
+    const void *buf;
+    size_t count;
+    UUID syscallUUID;
+  } WriteProcess;
 
 class TCPAssignment : public HostModule,
                       private RoutingInfoInterface,
@@ -103,12 +122,17 @@ private:
   std::map<std::pair<int, int>, Socket> sockets;
   // (ip, port) -> (pid, sockfd)
 	std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> pid_sockfd_by_ip_port;
+  // (ip, port) -> (pid, sockfd)
+  std::map<std::pair<in_addr_t, in_port_t>, std::pair<int, int>> estab_pid_sockfd_by_ip_port;
   // (pid, sockfd) -> DataInfo
   std::map<std::pair<int, int>, DataInfo> data_infos;
   // (pid) -> (Process) (Note: ONLY BLOCKED PROCESS IS HERE)
   std::map<int, Process> blocked_process_table;
-  // (pid, fd) -> (IOProcess) (Note: ONLY BLOCKED PROCESS IS HERE)
-  std::map<std::pair<int, int>, IOProcess> blocked_io_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY READ BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, ReadProcess> blocked_read_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
+
 
 public:
   TCPAssignment(Host &host);
@@ -116,9 +140,9 @@ public:
   virtual void finalize();
   virtual ~TCPAssignment();
 
-  // Our Implementation
-  ssize_t syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
-  ssize_t syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
+  /* System Calls */
+  void syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
+  void syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
   void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
 	void syscall_close(UUID syscallUUID, int pid, int fd);
 	void syscall_bind(UUID syscallUUID, int pid,
@@ -134,26 +158,28 @@ public:
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
 
-    // Utility Functions
-    std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+  /* Packet Managing Functions */
+  void manage_init(Packet *packet, Socket *socket);
+  void manage_listen(Packet *packet, Socket *socket);
+  void manage_synsent(Packet *packet, Socket *socket);
+  void manage_synrcvd(Packet *packet, Socket *socket);
+  void manage_estab(Packet *packet, Socket *socket);
+  void manage_fin(Packet *packet, Socket *socket);
 
-    sockaddr unit_addr(in_addr_t ip, in_port_t port);
+  /* Utility Functions For Packet Manipulation */
 
-    void read_packet_header(Packet *packet, DataInfo *c);
+  // Generate or Read SockAddr
+  std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
+  sockaddr unit_addr(in_addr_t ip, in_port_t port);
 
-    void write_packet_header(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      in_addr_t local_ip, in_addr_t remote_ip,
-      in_port_t local_port, in_port_t remote_port);
-
-    void write_packet_response(Packet *new_packet,
-      size_t ip_start, size_t tcp_start,
-      uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
-      in_addr_t local_ip, in_addr_t remote_ip);
-
-    void write_packet_header_mod(Packet *new_packet, DataInfo *c);
-
-    void write_packet_response_mod(Packet *new_packet, DataInfo *sc, DataInfo *rc);
+  // Read and Write Packet Header
+  void read_packet_header(Packet *packet, DataInfo *c);
+  void write_packet_header(Packet *new_packet, DataInfo *c);
+  void write_packet_header_without_checksum(Packet *new_packet, DataInfo *info);
+  void write_packet_header_mod(Packet *new_packet,
+    size_t ip_start, size_t tcp_start,
+    in_addr_t local_ip, in_addr_t remote_ip,
+    in_port_t local_port, in_port_t remote_port);
 
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,

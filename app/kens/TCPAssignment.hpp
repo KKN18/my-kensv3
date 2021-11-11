@@ -35,8 +35,9 @@ namespace E {
     sockaddr remote_addr;
 		uint32_t seq_num;
 		uint32_t ack_num;
-    uint8_t ihl;
     uint16_t total_length;
+    uint16_t checksum;
+    uint8_t ihl;
     uint8_t data_ofs;
     uint8_t flag;
 	} DataInfo;
@@ -83,6 +84,13 @@ namespace E {
     bool enough_send_space;
     uint32_t seq_num;
     uint32_t ack_num;
+
+
+
+    Time sent_time;
+    Time estimated_rtt;
+    Time dev_rtt;
+    Time timeout_interval;
 
     std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
 
@@ -166,8 +174,10 @@ public:
   void manage_estab(Packet *packet, Socket *socket);
   void manage_fin(Packet *packet, Socket *socket);
 
-  /* Utility Functions For Packet Manipulation */
+  /* Timer Calculation */
+  void calculate_timeout_interval(Socket *socket, Time sample_rtt);
 
+  /* Utility Functions For Packet Manipulation */
   // Generate or Read SockAddr
   std::pair<in_addr_t, in_port_t> divide_addr(sockaddr addr);
   sockaddr unit_addr(in_addr_t ip, in_port_t port);

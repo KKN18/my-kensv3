@@ -30,6 +30,11 @@
 #define SYN 2
 #define FIN 1
 
+/* For Timer Calculation */
+#define ALPHA 0.125
+#define BETA 0.25
+#define NS_TO_MS 1000
+
 namespace E {
 
 TCPAssignment::TCPAssignment(Host &host)
@@ -98,6 +103,19 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
   }
 }
 
+void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt){
+
+  Time dev_rtt = (1-BETA) * (socket->dev_rtt) + BETA * abs(sample_rtt - socket->estimated_rtt);
+  Time estimated_rtt = (1-ALPHA) * (socket->estimated_rtt) + ALPHA * sample_rtt;
+  Time timeout_interval = estimated_rtt + 4 * dev_rtt;
+
+  socket->timeout_interval = timeout_interval;
+  socket->dev_rtt = dev_rtt;
+  socket->estimated_rtt = estimated_rtt;
+
+  return;
+}
+
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   if(LOG) {
     printf("\npacketArrived=========================\n");
@@ -112,7 +130,39 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   in_port_t local_port, remote_port;
 
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
-  std::tie(remote_ip,remote_port) = divide_addr(received_info.remote_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  // Checksum Verification
+  uint16_t total_length = received_info.total_length;
+  uint8_t ihl = received_info.ihl;
+  uint8_t data_ofs = received_info.data_ofs;
+  uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+  uint8_t tcp_data[DATA_OFS + data_length];
+  uint32_t ip_msg, remote_ip_msg;
+  uint16_t checksum;
+  memset(tcp_data, 0, (DATA_OFS + data_length) * sizeof(uint8_t));
+
+  ip_msg = htonl(local_ip);
+  remote_ip_msg = htonl(remote_ip);
+
+  packet.readData(TCP_START, tcp_data, DATA_OFS + data_length);
+
+  tcp_data[16] = 0;
+  tcp_data[17] = 0;
+
+  checksum = ~ NetworkUtil::tcp_sum(remote_ip_msg, ip_msg, tcp_data, DATA_OFS + data_length);
+
+  if(LOG)
+  {
+    printf("Checksum is %u which should be %u\n", checksum, received_info.checksum);
+  }
+
+  if(received_info.checksum != checksum)
+  {
+    // Drop the packet if bit error detected.
+    printf("Bit Error Detected.. Drop the packet.\n");
+    return;
+  }
 
   auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(remote_ip, remote_port));
   if(iter == estab_pid_sockfd_by_ip_port.end())
@@ -134,7 +184,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   auto &s = iter2->second;
   s.pid = iter->second.first;
   s.fd = iter->second.second;
-	switch(s.state)
+
+
+  switch(s.state)
 	{
 		case INIT_STATE:
       manage_init(&packet, &s);
@@ -154,6 +206,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 		default:
 			assert(0);
 	}
+
   return;
 }
 
@@ -273,7 +326,11 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
 
         sendPacket("IPv4", std::move(packet));
 
-        printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+        if(LOG)
+        {
+          printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+        }
+
         s.seqnumQueue->push({info.seq_num + write_byte, write_byte});
 
         s.send_ptr += write_byte;
@@ -296,7 +353,6 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
     // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
     else
     {
-      printf("1-(b)\n");
       // this->returnSystemCall(syscallUUID, 0);
       WriteProcess p;
       p.fd = fd;
@@ -357,6 +413,10 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.acked_ptr = s.send_buffer;
   s.send_remaining = SEND_BUFFER_SIZE;
   s.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+  s.estimated_rtt = 100 * NS_TO_MS;
+  s.sent_time = 0;
+  s.timeout_interval = 1000 * NS_TO_MS;
+  s.dev_rtt = 0;
 
   sockets[{pid, fd}] = s;
 
@@ -569,6 +629,10 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.is_connected = true;
   new_socket.send_remaining = SEND_BUFFER_SIZE;
   new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+  new_socket.estimated_rtt = 100 * NS_TO_MS;
+  new_socket.timeout_interval = 1000 * NS_TO_MS;
+  new_socket.dev_rtt = 0;
+  new_socket.sent_time = 0;
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -699,6 +763,7 @@ void TCPAssignment::manage_listen(Packet *packet, Socket *socket)
   data_infos[{socket->pid, socket->fd}] = info;
   sendPacket("IPv4", std::move(new_packet));
 
+  // socket->sent_time = getCurrentTime();
   socket->state = SYN_RCVD_STATE;
 
   return;
@@ -771,9 +836,15 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
   }
   DataInfo received_info;
   read_packet_header(packet, &received_info);
+
+  // Time sample_rtt = getCurrentTime() - socket->sent_time;
+  // calculate_timeout_interval(socket, sample_rtt);
+
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
   uint8_t flag = received_info.flag;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
@@ -823,7 +894,8 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.packet_ptr = new_socket.receive_buffer;
     new_socket.remaining = 0;
     new_socket.window = 51200;
-    new_socket.seq_num = 1;
+    new_socket.seq_num = ack_num;
+    new_socket.ack_num = seq_num + 1;
     new_socket.send_ptr = new_socket.send_buffer;
     new_socket.acked_ptr = new_socket.send_buffer;
     new_socket.local_addr = info.local_addr;
@@ -831,6 +903,10 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.is_connected = true;
     new_socket.send_remaining = SEND_BUFFER_SIZE;
     new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+    new_socket.estimated_rtt = 100 * NS_TO_MS;
+    new_socket.timeout_interval = 1000 * NS_TO_MS;
+    new_socket.dev_rtt = 0;
+    new_socket.sent_time = 0;
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -922,6 +998,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     Packet new_packet(HEADER_SIZE);
     write_packet_header(&new_packet, &info);
     sendPacket("IPv4", std::move(new_packet));
+    // socket->sent_time = getCurrentTime();
   }
   // Handle ACK packet
   else if((flag & ACK) && (data_length == 0))
@@ -1150,6 +1227,7 @@ void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)
   uint8_t flag_msg, ihl, data_ofs;
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
+  uint16_t checksum;
 
   packet->readData(IP_START, &ihl, 1);
   packet->readData(IP_START + 2, &total_length, 2);
@@ -1161,6 +1239,8 @@ void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)
   packet->readData(TCP_START + 8, &ack_num_msg, 4);
 	packet->readData(TCP_START + 12, &data_ofs, 1);
 	packet->readData(TCP_START + 13, &flag_msg, 1);
+  packet->readData(TCP_START + 16, &checksum, 2);
+
 
   ihl = ihl & 15;
   total_length = ntohs(total_length);
@@ -1177,6 +1257,7 @@ void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)
   info->total_length = total_length;
   info->data_ofs = data_ofs;
   info->flag = flag_msg;
+  info->checksum = ntohs(checksum);
 
   return;
 }

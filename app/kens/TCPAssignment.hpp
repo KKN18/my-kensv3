@@ -72,6 +72,8 @@ namespace E {
     char *data_ptr;
     size_t remaining;
     bool is_rcvd_data;
+    uint32_t expect_seq_num;
+    uint32_t expect_ack_num;
 
     /* For Sender */
     char *send_buffer;
@@ -84,8 +86,6 @@ namespace E {
     bool enough_send_space;
     uint32_t seq_num;
     uint32_t ack_num;
-
-
 
     Time sent_time;
     Time estimated_rtt;
@@ -140,7 +140,8 @@ private:
   std::map<std::pair<int, int>, ReadProcess> blocked_read_table;
   // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
   std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
-
+  // set of (seq_num, ack_num)
+  std::set<std::pair<int, int>> unique_packets;
 
 public:
   TCPAssignment(Host &host);

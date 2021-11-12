@@ -50,9 +50,6 @@ void TCPAssignment::finalize() {}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
-  // if(FUNCTION_LOG) {
-  //   printf("(pid: %d) systemCallback\n", pid);
-  // }
 
   switch (param.syscallNumber) {
   case SOCKET:
@@ -140,6 +137,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint8_t tcp_data[DATA_OFS + data_length];
   uint32_t ip_msg, remote_ip_msg;
   uint16_t checksum;
+
   memset(tcp_data, 0, (DATA_OFS + data_length) * sizeof(uint8_t));
 
   ip_msg = htonl(local_ip);
@@ -152,17 +150,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   checksum = ~ NetworkUtil::tcp_sum(remote_ip_msg, ip_msg, tcp_data, DATA_OFS + data_length);
 
-  if(LOG)
-  {
-    printf("Checksum is %u which should be %u\n", checksum, received_info.checksum);
-  }
-
   if(received_info.checksum != checksum)
   {
     // Drop the packet if bit error detected.
-    printf("Bit Error Detected.. Drop the packet.\n");
+    if(LOG)
+      printf("Bit Error Detected.. Drop the packet.\n");
     return;
   }
+
 
   auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(remote_ip, remote_port));
   if(iter == estab_pid_sockfd_by_ip_port.end())
@@ -232,6 +227,7 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       if(s.remaining == 0) {
           s.is_rcvd_data = false;
           // blocked_read_table.erase(std::pair<in_addr_t, in_port_t>(pid, fd));
+          printf("syscall read remaining 0\n");
           this->returnSystemCall(syscallUUID, 0);
           return;
       }
@@ -240,6 +236,7 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       memcpy(buf, s.data_ptr, read_byte);
       s.data_ptr += read_byte;
       s.remaining -= read_byte;
+      printf("syscall read returns %d\n", read_byte);
       this->returnSystemCall(syscallUUID, read_byte);
       return;
   }
@@ -250,6 +247,7 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       read_p.count = count;
       read_p.syscallUUID = syscallUUID;
       blocked_read_table[{pid, fd}] = read_p;
+      printf("syscall read blocked\n");
       return;
   }
 }
@@ -633,6 +631,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.timeout_interval = 1000 * NS_TO_MS;
   new_socket.dev_rtt = 0;
   new_socket.sent_time = 0;
+  new_socket.expect_ack_num = info.seq_num;
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -759,6 +758,8 @@ void TCPAssignment::manage_listen(Packet *packet, Socket *socket)
   info.flag = SYN | ACK;
 
   Packet new_packet(HEADER_SIZE);
+
+  // printf("Initial past ack_num %d\n", socket->past_ack_num);
   write_packet_header(&new_packet, &info);
   data_infos[{socket->pid, socket->fd}] = info;
   sendPacket("IPv4", std::move(new_packet));
@@ -787,14 +788,12 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
-  printf("local_ip: %u, remote_ip: %u\n", local_ip, remote_ip);
   // TODO: Remove duplicatation in code
   if(flag & SYN)
   {
     DataInfo info;
     info.local_addr = unit_addr(local_ip, local_port);
     info.remote_addr = unit_addr(remote_ip, remote_port);
-    printf("seq_num : %u, ack_num : %u in manage_synsent\n", seq_num, ack_num);
     info.seq_num = ack_num; info.ack_num = seq_num + 1;
     info.flag = ACK;
 
@@ -805,6 +804,8 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     // Send first payload here
     socket->remote_addr =received_info.remote_addr;
     socket->local_addr = received_info.local_addr;
+    // Not Sure
+    // socket->expect_ack_num = info.seq_num;
 
     if(flag & ACK) {
       socket->state = ESTAB_STATE;
@@ -907,6 +908,7 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.timeout_interval = 1000 * NS_TO_MS;
     new_socket.dev_rtt = 0;
     new_socket.sent_time = 0;
+    new_socket.expect_ack_num = seq_num;
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -964,6 +966,45 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle data packet
   if(data_length != 0)
   {
+    // Fast retransmit
+    if(seq_num != socket->expect_ack_num)
+    {
+      DataInfo info;
+      info.local_addr = unit_addr(local_ip, local_port);
+      info.remote_addr = unit_addr(remote_ip, remote_port);
+      info.seq_num = ack_num; info.ack_num = socket->expect_ack_num;
+      info.flag = ACK;
+
+      Packet new_packet(HEADER_SIZE);
+      write_packet_header(&new_packet, &info);
+      sendPacket("IPv4", std::move(new_packet));
+      return;
+    }
+
+    printf("seq_num: %d, ack_num: %d expect_ack_num: %d\n", seq_num, ack_num, socket->expect_ack_num);
+    socket->expect_ack_num = seq_num + data_length;
+
+    auto pkt_iter = unique_packets.find({seq_num, ack_num});
+
+    if(pkt_iter == unique_packets.end())
+    {
+      unique_packets.insert({seq_num, ack_num});
+    }
+    else
+    {
+      // Send ACK for duplicated packet
+      DataInfo info;
+      info.local_addr = unit_addr(local_ip, local_port);
+      info.remote_addr = unit_addr(remote_ip, remote_port);
+      info.seq_num = ack_num; info.ack_num = seq_num + data_length;
+      info.flag = ACK;
+
+      Packet new_packet(HEADER_SIZE);
+      write_packet_header(&new_packet, &info);
+      sendPacket("IPv4", std::move(new_packet));
+      return;
+    }
+
     // (1) Copy the payload
     for(int i=0; i<data_length; i++) {
       packet->readData(data_start + i, socket->packet_ptr + i, 1);
@@ -985,6 +1026,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       memcpy(p.buf, socket->data_ptr, read_byte);
       socket->data_ptr += read_byte;
       socket->remaining -= read_byte;
+      printf("syscall read returns %d\n", read_byte);
       this->returnSystemCall(p.syscallUUID, read_byte);
     }
 
@@ -1000,24 +1042,32 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     sendPacket("IPv4", std::move(new_packet));
     // socket->sent_time = getCurrentTime();
   }
+  else if((flag & ACK) && (flag & FIN))
+  {
+    assert(data_length == 0);
+    if(LOG)
+    {
+      printf("FIN ACK packet received\n");
+    }
+  }
   // Handle ACK packet
   else if((flag & ACK) && (data_length == 0))
   {
     auto &target = socket->seqnumQueue->front();
 
-    printf("target.first %d ack_num %d\n", target.first, ack_num);
-    printf("ACK seq_num %d data_length %d\n", target.first, target.second);
+    // printf("target.first %d ack_num %d\n", target.first, ack_num);
+    // printf("ACK seq_num %d data_length %d\n", target.first, target.second);
 
     if(target.first != ack_num)
     {
       printf("Out of Order!\n");
+      assert(0);
     }
 
     socket->acked_ptr += target.second;
     socket->seqnumQueue->pop();
 
     auto iter = blocked_write_table.find({socket->pid, socket->fd});
-    printf("How many blocked? : %d\n", blocked_write_table.size());
     if (iter != blocked_write_table.end())
     {
       auto &p = iter->second;
@@ -1091,7 +1141,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
             sendPacket("IPv4", std::move(packet));
 
-            printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+            if(LOG)
+              printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
             socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
 
             socket->send_ptr += write_byte;
@@ -1173,7 +1224,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
           sendPacket("IPv4", std::move(packet));
 
-          printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+          if(LOG)
+            printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
           socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
 
           socket->send_ptr += write_byte;

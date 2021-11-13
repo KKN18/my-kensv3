@@ -94,6 +94,8 @@ namespace E {
     Time dev_rtt;
     Time timeout_interval;
 
+    bool timer_alive;
+
     std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
 
   } Socket;
@@ -153,8 +155,10 @@ private:
   std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
   // set of (seq_num, ack_num) (Note: RECEIVED PACKETS)
   std::set<std::pair<uint32_t, uint32_t>> unique_packets;
-  // (seq_num, ack_num) -> (Packet) (Note: SENT PACKETS)
+  // (seq_num, ack_num) -> (Packet) (Note: SENT PACKETS THAT ARE ACKED)
   std::map<std::pair<uint32_t, uint32_t>, Packet> sent_packets;
+  // queue of inflight packets, aka pakcets that are sent but not acked.
+  std::list<std::pair<uint32_t, uint32_t>> inflight_packets_info;
 
 public:
   TCPAssignment(Host &host);

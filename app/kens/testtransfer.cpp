@@ -333,7 +333,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Send_Symmetric) {
 
   this->runTest();
 }
-
+*/
 
 TEST_F(TestEnv_Any, TestTransfer_Connect_Send_EOF) {
   std::unordered_map<std::string, std::string> accept_env;
@@ -392,6 +392,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Send_EOF) {
 
 //---------
 
+
 TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_Symmetric) {
   std::unordered_map<std::string, std::string> accept_env;
   std::unordered_map<std::string, std::string> connect_env;
@@ -446,7 +447,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_Symmetric) {
 
   this->runTest();
 }
-*/
+
 
 TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_EOF) {
   std::unordered_map<std::string, std::string> accept_env;
@@ -502,7 +503,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_EOF) {
 
   this->runTest();
 }
-/*
+
 TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_SmallBuffer1) {
   std::unordered_map<std::string, std::string> accept_env;
   std::unordered_map<std::string, std::string> connect_env;
@@ -612,7 +613,7 @@ TEST_F(TestEnv_Any, TestTransfer_Connect_Recv_SmallBuffer2) {
 
   this->runTest();
 }
-*/
+
 //======================================
 /*
 TEST_F(TestEnv_Any, TestTransfer_Accept_Send_Symmetric) {

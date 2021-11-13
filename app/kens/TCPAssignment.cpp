@@ -33,7 +33,7 @@
 /* For Timer Calculation */
 #define ALPHA 0.125
 #define BETA 0.25
-#define NS_TO_MS 1000
+#define MS_TO_NS 1000
 
 namespace E {
 
@@ -100,8 +100,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
   }
 }
 
-void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt){
-
+void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt) {
   Time dev_rtt = (1-BETA) * (socket->dev_rtt) + BETA * abs(sample_rtt - socket->estimated_rtt);
   Time estimated_rtt = (1-ALPHA) * (socket->estimated_rtt) + ALPHA * sample_rtt;
   Time timeout_interval = estimated_rtt + 4 * dev_rtt;
@@ -210,7 +209,21 @@ void TCPAssignment::timerCallback(std::any payload) {
     printf("timerCallback\n");
   }
   // Remove below
-  (void)payload;
+  printf("payload type: %s\n",payload.type().name());
+  auto timer_info = std::any_cast<Timer_PayLoad_Info>(payload);
+  auto iter = sent_packets.find({timer_info.seq_num, timer_info.ack_num});
+
+  if(iter == sent_packets.end())
+  {
+    assert(0);
+  }
+
+  Packet packet = iter->second;
+  sendPacket("IPv4", std::move(packet));
+
+  Socket &s = sockets[{timer_info.pid, timer_info.fd}];
+  s.timerUUID = this->addTimer(timer_info, timer_info.timeout_interval);
+  return;
 }
 
 void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count)
@@ -411,9 +424,9 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.acked_ptr = s.send_buffer;
   s.send_remaining = SEND_BUFFER_SIZE;
   s.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
-  s.estimated_rtt = 100 * NS_TO_MS;
+  s.estimated_rtt = 100 * MS_TO_NS;
   s.sent_time = 0;
-  s.timeout_interval = 1000 * NS_TO_MS;
+  s.timeout_interval = 1000 * MS_TO_NS;
   s.dev_rtt = 0;
 
   sockets[{pid, fd}] = s;
@@ -546,7 +559,23 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   packet.writeData(TCP_START + 16, &checksum_converted, 2);
   /* Writing packet finished */
   sendPacket("IPv4", std::move(packet));
+  // Add timer
+  // Just a temporary value
+  uint32_t ack_num = 0;
+  Packet clone_packet = packet.clone();
+  // Packet clone_packet(HEADER_SIZE) = packet;
+  // sent_packets.insert(std::pair<std::pair<uint32_t, uint32_t>, Packet>((seq_num, ack_num), clone_packet));
+  // sent_packets[{seq_num, ack_num}] = clone_packet;
+  sent_packets.insert({{seq_num, ack_num}, clone_packet});
 
+  Timer_PayLoad_Info timer_info;
+  timer_info.seq_num = seq_num;
+  timer_info.ack_num = ack_num;
+  timer_info.timeout_interval = s.timeout_interval;
+  timer_info.pid = pid;
+  timer_info.fd = sockfd;
+  UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
+  s.timerUUID = timerUUID;
   s.state = SYN_SENT_STATE;
 
   return;
@@ -627,8 +656,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.is_connected = true;
   new_socket.send_remaining = SEND_BUFFER_SIZE;
   new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
-  new_socket.estimated_rtt = 100 * NS_TO_MS;
-  new_socket.timeout_interval = 1000 * NS_TO_MS;
+  new_socket.estimated_rtt = 100 * MS_TO_NS;
+  new_socket.timeout_interval = 1000 * MS_TO_NS;
   new_socket.dev_rtt = 0;
   new_socket.sent_time = 0;
   new_socket.expect_ack_num = info.seq_num;
@@ -777,6 +806,7 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     printf("manage_synsent\n");
   }
   DataInfo received_info;
+  this->cancelTimer(socket->timerUUID);
   read_packet_header(packet, &received_info);
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
@@ -904,8 +934,8 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.is_connected = true;
     new_socket.send_remaining = SEND_BUFFER_SIZE;
     new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
-    new_socket.estimated_rtt = 100 * NS_TO_MS;
-    new_socket.timeout_interval = 1000 * NS_TO_MS;
+    new_socket.estimated_rtt = 100 * MS_TO_NS;
+    new_socket.timeout_interval = 1000 * MS_TO_NS;
     new_socket.dev_rtt = 0;
     new_socket.sent_time = 0;
     new_socket.expect_ack_num = seq_num;

@@ -87,6 +87,8 @@ namespace E {
     uint32_t seq_num;
     uint32_t ack_num;
 
+    /* For Timer Implementation */
+    UUID timerUUID;
     Time sent_time;
     Time estimated_rtt;
     Time dev_rtt;
@@ -119,6 +121,15 @@ namespace E {
     UUID syscallUUID;
   } WriteProcess;
 
+  typedef struct _Timer_Payload_Info
+  {
+    uint32_t seq_num;
+    uint32_t ack_num;
+    int pid;
+    int fd;
+    Time timeout_interval;
+  } Timer_PayLoad_Info;
+
 class TCPAssignment : public HostModule,
                       private RoutingInfoInterface,
                       public SystemCallInterface,
@@ -140,8 +151,10 @@ private:
   std::map<std::pair<int, int>, ReadProcess> blocked_read_table;
   // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
   std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
-  // set of (seq_num, ack_num)
-  std::set<std::pair<int, int>> unique_packets;
+  // set of (seq_num, ack_num) (Note: RECEIVED PACKETS)
+  std::set<std::pair<uint32_t, uint32_t>> unique_packets;
+  // (seq_num, ack_num) -> (Packet) (Note: SENT PACKETS)
+  std::map<std::pair<uint32_t, uint32_t>, Packet> sent_packets;
 
 public:
   TCPAssignment(Host &host);

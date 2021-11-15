@@ -94,6 +94,8 @@ namespace E {
     Time dev_rtt;
     Time timeout_interval;
 
+    uint32_t timer_seq_num;
+
     bool timer_alive;
 
     std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;

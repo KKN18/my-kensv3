@@ -335,7 +335,6 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
         sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
         s.inflight_packets_info->push_back({info.seq_num, info.ack_num});
 
-
         if (!s.timer_alive) {
           Timer_PayLoad_Info timer_info;
           timer_info.seq_num = info.seq_num;
@@ -346,6 +345,8 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
           UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
           s.timerUUID = timerUUID;
           s.timer_alive = true;
+          s.timer_seq_num = info.seq_num + write_byte;
+          s.sent_time = getCurrentTime();
         }
 
         if(OLD_LOG)
@@ -441,6 +442,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.dev_rtt = 0;
   s.timer_alive = false;
   s.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+  s.timer_seq_num = 0;
+  s.sent_time = 0;
 
   sockets[{pid, fd}] = s;
 
@@ -690,6 +693,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.expect_ack_num = info.seq_num;
   new_socket.timer_alive = false;
   new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+  new_socket.sent_time = 0;
+  new_socket.timer_seq_num = 0;
 
 
   *addr = info.local_addr;
@@ -972,6 +977,8 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.expect_ack_num = seq_num;
     new_socket.timer_alive;
     new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+    new_socket.sent_time = 0;
+    new_socket.timer_seq_num = 0;
 
 
     *process.addr = info.local_addr;
@@ -1118,6 +1125,15 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     auto &target = socket->seqnumQueue->front();
 
     int diff = ack_num - target.first;
+
+    if(socket->timer_seq_num == ack_num)
+    {
+      // TIMER UPDATE
+      Time current_time = getCurrentTime();
+      Time sample_rtt = current_time - socket->sent_time;
+      calculate_timeout_interval(socket, sample_rtt);
+      printf("socket timeout_interval %d\n", socket->timeout_interval);
+    }
     // printf("target.first %u ack_num %u\n", target.first, ack_num);
 
     if(target.first > ack_num)
@@ -1134,9 +1150,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       uint32_t first_seq_num = socket->inflight_packets_info->front().first;
       uint32_t first_ack_num = socket->inflight_packets_info->front().second;
 
-      // assert(ack_num == first_ack_num);
-
-      // printf("Retransmit first seq %u ack %u\n", first_seq_num, first_ack_num);
       for(iter; iter!= socket->inflight_packets_info->end(); iter++) {
         auto piter = sent_packets.find({iter->first, iter->second});
         if( piter == sent_packets.end() )
@@ -1147,7 +1160,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         // Resent Packet
         sendPacket("IPv4", std::move(packet));
       }
-      // printf("Retransmit Last seq %u ack %u\n", socket->inflight_packets_info->back().first, socket->inflight_packets_info->back().second);
 
       Timer_PayLoad_Info timer_info;
       timer_info.seq_num = first_seq_num;
@@ -1307,6 +1319,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
               UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
               socket->timerUUID = timerUUID;
               socket->timer_alive = true;
+              socket->sent_time = getCurrentTime();
+              socket->timer_seq_num = info.seq_num + write_byte;
             }
 
             if(OLD_LOG)
@@ -1408,6 +1422,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
             UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
             socket->timerUUID = timerUUID;
             socket->timer_alive = true;
+            socket->sent_time = getCurrentTime();
+            socket->timer_seq_num = info.seq_num + write_byte;
           }
 
           if(LOG)

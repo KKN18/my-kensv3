@@ -13,9 +13,9 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define FUNCTION_LOG 1
-#define STATE_LOG 1
-#define LOG 1
+#define FUNCTION_LOG 0
+#define STATE_LOG 0
+#define LOG 0
 #define OLD_LOG 0
 #define IP_START 14
 #define TCP_START 34
@@ -237,7 +237,6 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       if(s.remaining == 0) {
           s.is_rcvd_data = false;
           // blocked_read_table.erase(std::pair<in_addr_t, in_port_t>(pid, fd));
-          printf("syscall read remaining 0\n");
           this->returnSystemCall(syscallUUID, 0);
           return;
       }
@@ -246,7 +245,6 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       memcpy(buf, s.data_ptr, read_byte);
       s.data_ptr += read_byte;
       s.remaining -= read_byte;
-      printf("syscall read returns %d\n", read_byte);
       this->returnSystemCall(syscallUUID, read_byte);
       return;
   }
@@ -257,7 +255,6 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, s
       read_p.count = count;
       read_p.syscallUUID = syscallUUID;
       blocked_read_table[{pid, fd}] = read_p;
-      printf("syscall read blocked\n");
       return;
   }
 }
@@ -475,7 +472,6 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
     p.syscallUUID = syscallUUID;
     // No need for using buf and count
     blocked_close_table[{pid, fd}] = p;
-    printf("SYSCALL BLOCKED\n");
 
     return;
   }
@@ -1049,7 +1045,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       return;
     }
 
-    printf("seq_num: %d, ack_num: %d expect_ack_num: %d\n", seq_num, ack_num, socket->expect_ack_num);
     socket->expect_ack_num = seq_num + data_length;
 
     auto pkt_iter = unique_packets.find({seq_num, ack_num});
@@ -1094,7 +1089,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       memcpy(p.buf, socket->data_ptr, read_byte);
       socket->data_ptr += read_byte;
       socket->remaining -= read_byte;
-      printf("syscall read returns %d\n", read_byte);
       this->returnSystemCall(p.syscallUUID, read_byte);
     }
 
@@ -1121,17 +1115,14 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle ACK packet
   else if((flag & ACK) && (data_length == 0))
   {
-    // inflight packets 제대로 있는지 확인
-    printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
-
     auto &target = socket->seqnumQueue->front();
 
     int diff = ack_num - target.first;
-    printf("target.first %u ack_num %u\n", target.first, ack_num);
+    // printf("target.first %u ack_num %u\n", target.first, ack_num);
 
     if(target.first > ack_num)
     {
-      printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
+      // printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
       // Send all pakcets in inflight_packets_info
 
       // Cancel Timer
@@ -1145,7 +1136,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
       // assert(ack_num == first_ack_num);
 
-      printf("Retransmit first seq %u ack %u\n", first_seq_num, first_ack_num);
+      // printf("Retransmit first seq %u ack %u\n", first_seq_num, first_ack_num);
       for(iter; iter!= socket->inflight_packets_info->end(); iter++) {
         auto piter = sent_packets.find({iter->first, iter->second});
         if( piter == sent_packets.end() )
@@ -1156,7 +1147,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         // Resent Packet
         sendPacket("IPv4", std::move(packet));
       }
-      printf("Retransmit Last seq %u ack %u\n", socket->inflight_packets_info->back().first, socket->inflight_packets_info->back().second);
+      // printf("Retransmit Last seq %u ack %u\n", socket->inflight_packets_info->back().first, socket->inflight_packets_info->back().second);
 
       Timer_PayLoad_Info timer_info;
       timer_info.seq_num = first_seq_num;
@@ -1187,8 +1178,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       if(socket->inflight_packets_info->empty())
         break;
     }
-    printf("inflight_packets_info front ack %d, ack_num %d\n", socket->inflight_packets_info->front().first, ack_num);
-    printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
+    // printf("inflight_packets_info front ack %d, ack_num %d\n", socket->inflight_packets_info->front().first, ack_num);
+    // printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
 
     auto biter = blocked_close_table.find({socket->pid, socket->fd});
 

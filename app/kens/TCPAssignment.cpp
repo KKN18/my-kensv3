@@ -16,6 +16,7 @@
 #define FUNCTION_LOG 1
 #define STATE_LOG 1
 #define LOG 1
+#define OLD_LOG 0
 #define IP_START 14
 #define TCP_START 34
 #define HEADER_SIZE 54
@@ -206,8 +207,6 @@ void TCPAssignment::timerCallback(std::any payload) {
   if(FUNCTION_LOG) {
     printf("timerCallback\n");
   }
-  // Remove below
-  printf("payload type: %s\n",payload.type().name());
   auto timer_info = std::any_cast<Timer_PayLoad_Info>(payload);
   auto iter = sent_packets.find({timer_info.seq_num, timer_info.ack_num});
 
@@ -336,12 +335,9 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
         sendPacket("IPv4", std::move(packet));
         // Call Timer
         Packet clone_packet = packet.clone();
-        // Packet clone_packet(HEADER_SIZE) = packet;
-        // sent_packets.insert(std::pair<std::pair<uint32_t, uint32_t>, Packet>((seq_num, ack_num), clone_packet));
-        // sent_packets[{seq_num, ack_num}] = clone_packet;
         sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+        s.inflight_packets_info->push_back({info.seq_num, info.ack_num});
 
-        inflight_packets_info.push_back({info.seq_num, info.ack_num});
 
         if (!s.timer_alive) {
           Timer_PayLoad_Info timer_info;
@@ -355,7 +351,7 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
           s.timer_alive = true;
         }
 
-        if(LOG)
+        if(OLD_LOG)
         {
           printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
         }
@@ -447,6 +443,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.timeout_interval = 100 * MS_TO_NS;
   s.dev_rtt = 0;
   s.timer_alive = false;
+  s.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
 
   sockets[{pid, fd}] = s;
 
@@ -469,12 +466,27 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
   std::tie(local_ip, local_port) = divide_addr(s.local_addr);
 
+  // Wait until all inflight packets are ACKed
+  if(!s.inflight_packets_info->empty())
+  {
+    // Block
+    CloseProcess p;
+    p.fd = fd;
+    p.syscallUUID = syscallUUID;
+    // No need for using buf and count
+    blocked_close_table[{pid, fd}] = p;
+    printf("SYSCALL BLOCKED\n");
+
+    return;
+  }
+
   // For cases where s.remote_addr is uninitialized
   if(s.is_connected)
   {
     std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
     estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
   }
+
 
   pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
 
@@ -681,6 +693,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.sent_time = 0;
   new_socket.expect_ack_num = info.seq_num;
   new_socket.timer_alive = false;
+  new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -961,6 +975,8 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.sent_time = 0;
     new_socket.expect_ack_num = seq_num;
     new_socket.timer_alive;
+    new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -1105,28 +1121,32 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle ACK packet
   else if((flag & ACK) && (data_length == 0))
   {
+    // inflight packets 제대로 있는지 확인
+    printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
+
     auto &target = socket->seqnumQueue->front();
 
-    // printf("target.first %d ack_num %d\n", target.first, ack_num);
-    // printf("ACK seq_num %d data_length %d\n", target.first, target.second);
-
     int diff = ack_num - target.first;
+    printf("target.first %u ack_num %u\n", target.first, ack_num);
 
     if(target.first > ack_num)
     {
-      printf("Out of Order! target.first %d ack_num %d\n", target.first, ack_num);
+      printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
       // Send all pakcets in inflight_packets_info
 
       // Cancel Timer
       this->cancelTimer(socket->timerUUID);
       socket->timer_alive = false;
 
-      auto iter = inflight_packets_info.begin();
+      auto iter = socket->inflight_packets_info->begin();
 
-      uint32_t first_seq_num = inflight_packets_info.front().first;
-      uint32_t first_ack_num = inflight_packets_info.front().second;
-      printf("Retransmit first seq %d ack %d\n", first_seq_num, first_ack_num);
-      for(iter; iter!= inflight_packets_info.end(); iter++){
+      uint32_t first_seq_num = socket->inflight_packets_info->front().first;
+      uint32_t first_ack_num = socket->inflight_packets_info->front().second;
+
+      // assert(ack_num == first_ack_num);
+
+      printf("Retransmit first seq %u ack %u\n", first_seq_num, first_ack_num);
+      for(iter; iter!= socket->inflight_packets_info->end(); iter++) {
         auto piter = sent_packets.find({iter->first, iter->second});
         if( piter == sent_packets.end() )
         {
@@ -1136,7 +1156,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         // Resent Packet
         sendPacket("IPv4", std::move(packet));
       }
-      printf("Retransmit Last seq %d ack %d\n", inflight_packets_info.back().first, inflight_packets_info.back().second);
+      printf("Retransmit Last seq %u ack %u\n", socket->inflight_packets_info->back().first, socket->inflight_packets_info->back().second);
+
       Timer_PayLoad_Info timer_info;
       timer_info.seq_num = first_seq_num;
       timer_info.ack_num = first_ack_num;
@@ -1153,15 +1174,57 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     this->cancelTimer(socket->timerUUID);
     socket->timer_alive = false;
 
-    inflight_packets_info.pop_front();
-    printf("inflight_packets_info.size: %d\n", inflight_packets_info.size());
-
     assert(diff >= 0);
-
     socket->acked_ptr += (diff + target.second);
+
     while(socket->seqnumQueue->front().first != ack_num)
       socket->seqnumQueue->pop();
     socket->seqnumQueue->pop();
+
+    while(socket->inflight_packets_info->front().first < ack_num)
+    {
+      socket->inflight_packets_info->pop_front();
+      if(socket->inflight_packets_info->empty())
+        break;
+    }
+    printf("inflight_packets_info front ack %d, ack_num %d\n", socket->inflight_packets_info->front().first, ack_num);
+    printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
+
+    auto biter = blocked_close_table.find({socket->pid, socket->fd});
+
+    if (biter != blocked_close_table.end())
+    {
+      if(socket->inflight_packets_info->empty())
+      {
+        auto &p = biter->second;
+
+        // Remaining syscall_close procedure
+        // For cases where s.remote_addr is uninitialized
+        if(socket->is_connected)
+        {
+          std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
+          estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
+        }
+
+        pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
+
+        // Free malloced memory in syscall_socket
+        // delete queues and lists
+        free(socket->receive_buffer);
+        free(socket->send_buffer);
+
+        sockets.erase({socket->pid, socket->fd});
+
+      	this->removeFileDescriptor(socket->pid, socket->fd);
+      	this->returnSystemCall(p.syscallUUID, 0);
+        return;
+      }
+      else
+      {
+        // Writing is Done. Only Receiving ACK is enough.
+        return;
+      }
+    }
 
     auto iter = blocked_write_table.find({socket->pid, socket->fd});
     if (iter != blocked_write_table.end())
@@ -1241,7 +1304,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
             Packet clone_packet = packet.clone();
             sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
 
-            inflight_packets_info.push_back({info.seq_num, info.ack_num});
+            socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
 
             if (!socket->timer_alive) {
               Timer_PayLoad_Info timer_info;
@@ -1255,10 +1318,10 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
               socket->timer_alive = true;
             }
 
-            if(LOG)
+            if(OLD_LOG)
               printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
-            socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
 
+            socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
             socket->send_ptr += write_byte;
             socket->send_remaining -= write_byte;
             count -= write_byte;
@@ -1340,9 +1403,9 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
           // Reset Timer
           Packet clone_packet = packet.clone();
-          sent_packets.insert({{seq_num, ack_num}, clone_packet});
+          sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
 
-          inflight_packets_info.push_back({seq_num, ack_num});
+          socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
 
           if (!socket->timer_alive) {
             Timer_PayLoad_Info timer_info;

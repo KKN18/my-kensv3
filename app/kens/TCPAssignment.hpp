@@ -98,6 +98,9 @@ namespace E {
 
     std::queue<std::pair<uint32_t, uint32_t>> *seqnumQueue;
 
+    // queue of inflight packets, aka pakcets that are sent but not acked.
+    std::list<std::pair<uint32_t, uint32_t>> *inflight_packets_info;
+
   } Socket;
 
   typedef struct _Process
@@ -122,6 +125,12 @@ namespace E {
     size_t count;
     UUID syscallUUID;
   } WriteProcess;
+
+  typedef struct _CloseProcess
+  {
+    int fd;
+    UUID syscallUUID;
+  } CloseProcess;
 
   typedef struct _Timer_Payload_Info
   {
@@ -153,12 +162,13 @@ private:
   std::map<std::pair<int, int>, ReadProcess> blocked_read_table;
   // (pid, fd) -> (IOProcess) (Note: ONLY WRITE BLOCKED PROCESS IS HERE)
   std::map<std::pair<int, int>, WriteProcess> blocked_write_table;
+  // (pid, fd) -> (IOProcess) (Note: ONLY CLOSE BLOCKED PROCESS IS HERE)
+  std::map<std::pair<int, int>, CloseProcess> blocked_close_table;
   // set of (seq_num, ack_num) (Note: RECEIVED PACKETS)
   std::set<std::pair<uint32_t, uint32_t>> unique_packets;
   // (seq_num, ack_num) -> (Packet) (Note: SENT PACKETS THAT ARE ACKED)
   std::map<std::pair<uint32_t, uint32_t>, Packet> sent_packets;
-  // queue of inflight packets, aka pakcets that are sent but not acked.
-  std::list<std::pair<uint32_t, uint32_t>> inflight_packets_info;
+
 
 public:
   TCPAssignment(Host &host);

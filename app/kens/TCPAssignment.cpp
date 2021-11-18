@@ -13,9 +13,9 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define FUNCTION_LOG 1
-#define STATE_LOG 1
-#define LOG 1
+#define FUNCTION_LOG 0
+#define STATE_LOG 0
+#define LOG 0
 #define OLD_LOG 1
 #define IP_START 14
 #define TCP_START 34
@@ -1192,6 +1192,13 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle ACK packet
   else if((flag & ACK) && (data_length == 0))
   {
+    if(socket->seqnumQueue->empty())
+    {
+      if(LOG)
+        printf("Manage estab early return 0");
+      return;
+    }
+
     auto &target = socket->seqnumQueue->front();
 
     int diff = ack_num - target.first;
@@ -1289,6 +1296,10 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
         // Free malloced memory in syscall_socket
         // delete queues and lists
+
+        if(LOG)
+          printf("Possible Segmentation Fault\n");
+
         free(socket->receive_buffer);
         free(socket->send_buffer);
 

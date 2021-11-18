@@ -13,10 +13,10 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define FUNCTION_LOG 0
-#define STATE_LOG 0
-#define LOG 0
-#define OLD_LOG 0
+#define FUNCTION_LOG 1
+#define STATE_LOG 1
+#define LOG 1
+#define OLD_LOG 1
 #define IP_START 14
 #define TCP_START 34
 #define HEADER_SIZE 54
@@ -105,7 +105,15 @@ void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt) 
   Time dev_rtt = (1-BETA) * (socket->dev_rtt) + BETA * abs(sample_rtt - socket->estimated_rtt);
   Time estimated_rtt = (1-ALPHA) * (socket->estimated_rtt) + ALPHA * sample_rtt;
   Time timeout_interval = estimated_rtt + 4 * dev_rtt;
-
+  // printf("[Before]Timeout interval %d\n", (timeout_interval/MS_TO_NS));
+  // Time min = 50*MS_TO_NS, max = 1000*MS_TO_NS;
+  // if (timeout_interval < min){
+  //   timeout_interval = min;
+  // }
+  // if (timeout_interval > max){
+  //   timeout_interval = max;
+  // }
+  // printf("[After]Timeout interval %d\n", (timeout_interval/MS_TO_NS));
   socket->timeout_interval = timeout_interval;
   socket->dev_rtt = dev_rtt;
   socket->estimated_rtt = estimated_rtt;
@@ -212,7 +220,7 @@ void TCPAssignment::timerCallback(std::any payload) {
 
   if(iter == sent_packets.end())
   {
-    assert(0);
+    return;
   }
 
   Packet packet = iter->second;
@@ -444,6 +452,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
   s.timer_seq_num = 0;
   s.sent_time = 0;
+  s.retransmit_ack = 0;
 
   sockets[{pid, fd}] = s;
 
@@ -508,6 +517,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
   auto iter = sockets.find({pid, sockfd});
   if(iter == sockets.end()) {
+    printf("Cannot find connect socket\n");
     this->returnSystemCall(syscallUUID, -1);
   }
 
@@ -607,7 +617,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
   s.timerUUID = timerUUID;
   s.state = SYN_SENT_STATE;
-
   return;
 }
 
@@ -695,6 +704,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
   new_socket.sent_time = 0;
   new_socket.timer_seq_num = 0;
+  new_socket.retransmit_ack = 0;
 
 
   *addr = info.local_addr;
@@ -828,6 +838,26 @@ void TCPAssignment::manage_listen(Packet *packet, Socket *socket)
   data_infos[{socket->pid, socket->fd}] = info;
   sendPacket("IPv4", std::move(new_packet));
 
+  Packet clone_packet = new_packet.clone();
+  sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+  socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+  if (1) {
+    Timer_PayLoad_Info timer_info;
+    timer_info.seq_num = info.seq_num;
+    timer_info.ack_num = info.ack_num;
+    timer_info.timeout_interval = socket->timeout_interval;
+    timer_info.pid = socket->pid;
+    timer_info.fd = socket->fd;
+    printf("ACCEPT timeout_interval %d pid %d\n", socket->timeout_interval/MS_TO_NS, socket->pid);
+    UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+    socket->timerUUID = timerUUID;
+    socket->timer_alive = true;
+    socket->sent_time = getCurrentTime();
+    socket->timer_seq_num = info.seq_num+1;
+  }
+
   // socket->sent_time = getCurrentTime();
   socket->state = SYN_RCVD_STATE;
 
@@ -841,7 +871,6 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     printf("manage_synsent\n");
   }
   DataInfo received_info;
-  this->cancelTimer(socket->timerUUID);
   read_packet_header(packet, &received_info);
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
@@ -866,6 +895,12 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     write_packet_header(&new_packet, &info);
     sendPacket("IPv4", std::move(new_packet));
 
+    Packet clone_packet = new_packet.clone();
+    sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+    socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+
     // Send first payload here
     socket->remote_addr =received_info.remote_addr;
     socket->local_addr = received_info.local_addr;
@@ -873,23 +908,39 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
     // socket->expect_ack_num = info.seq_num;
 
     if(flag & ACK) {
+      this->cancelTimer(socket->timerUUID);
+
+      Timer_PayLoad_Info timer_info;
+      timer_info.seq_num = info.seq_num;
+      timer_info.ack_num = info.ack_num;
+      printf("SYNSENT timeout_interval %d\n", socket->timeout_interval/MS_TO_NS);
+      timer_info.timeout_interval = socket->timeout_interval;
+      timer_info.pid = socket->pid;
+      timer_info.fd = socket->fd;
+      UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+      socket->timerUUID = timerUUID;
+      socket->timer_alive = true;
+      socket->sent_time = getCurrentTime();
+      socket->timer_seq_num = info.seq_num+1;
+
       socket->state = ESTAB_STATE;
       socket->is_connected = true;
       socket->expect_ack_num = seq_num + 1;
 
       estab_pid_sockfd_by_ip_port[{remote_ip, remote_port}] = {socket->pid, socket->fd};
     }
-    else socket->state = SYN_RCVD_STATE;
+    else socket->state = SYN_SENT_STATE;
 
     auto iter = blocked_process_table.find(socket->pid);
-    assert(iter != blocked_process_table.end());
+
+    if(iter == blocked_process_table.end())
+      return;
 
     auto &process = iter->second;
     this->returnSystemCall(process.syscallUUID, 0);
     blocked_process_table.erase(socket->pid);
   }
   else {
-    assert(0);
   }
 
   return;
@@ -904,8 +955,6 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
   DataInfo received_info;
   read_packet_header(packet, &received_info);
 
-  // Time sample_rtt = getCurrentTime() - socket->sent_time;
-  // calculate_timeout_interval(socket, sample_rtt);
 
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
@@ -916,14 +965,25 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
   if(flag & SYN) {
+    printf("listenqueue size : %d, backlog : %d\n", socket->listenQueue->size() , socket->backlog);
     if (socket->listenQueue->size() + 1 < socket->backlog) {
       Packet clone_packet = *packet;
       socket->listenQueue->push(clone_packet);
+      printf("ListenQueue push\n");
     }
+    printf("And return\n");
+    return;
+  }
+  this->cancelTimer(socket->timerUUID);
+  Time sample_rtt = getCurrentTime() - socket->sent_time;
+  calculate_timeout_interval(socket, sample_rtt);
+  printf("Canceled timer pid %d\n", socket->pid);
+  auto info_it = data_infos.find({socket->pid, socket->fd});
+  if (info_it == data_infos.end()){
+    printf("Here1\n");
     return;
   }
 
-  auto info_it = data_infos.find({socket->pid, socket->fd});
   assert(info_it != data_infos.end());
 
   auto &info = info_it->second;
@@ -935,10 +995,14 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
 
   if(temp_local_ip != local_ip || temp_remote_ip != remote_ip ||
     temp_local_port != local_port || temp_remote_port != remote_port) {
+      printf("Here2\n");
       return;
   }
 
-  if(!(flag & ACK)) return;
+  if(!(flag & ACK)) {
+    printf("Here3\n");
+    return;
+  }
 
   auto iter = blocked_process_table.find(socket->pid);
   if(iter != blocked_process_table.end()) {
@@ -979,6 +1043,7 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
     new_socket.sent_time = 0;
     new_socket.timer_seq_num = 0;
+    new_socket.retransmit_ack = 0;
 
 
     *process.addr = info.local_addr;
@@ -989,13 +1054,16 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
 
     this->returnSystemCall(process.syscallUUID, new_fd);
     blocked_process_table.erase(socket->pid);
+    printf("Accept right now\n");
   }
   else {
+    printf("Accept later\n");
     socket->acceptQueue->push(info);
   }
 
   socket->state = LISTEN_STATE;
   if(socket->listenQueue->empty()) {
+    printf("Here4\n");
     return;
   }
 
@@ -1016,6 +1084,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   }
   DataInfo received_info;
   read_packet_header(packet, &received_info);
+  this->cancelTimer(socket->timerUUID);
+
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
   uint32_t seq_num = received_info.seq_num;
@@ -1140,6 +1210,12 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
     {
       // printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
       // Send all pakcets in inflight_packets_info
+      if(socket->retransmit_ack == ack_num)
+      {
+        return;
+      }
+
+      socket->retransmit_ack = ack_num;
 
       // Cancel Timer
       this->cancelTimer(socket->timerUUID);
@@ -1441,7 +1517,7 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   }
   else
   {
-    assert(0);
+    // assert(0);
     return;
   }
 

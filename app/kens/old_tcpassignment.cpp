@@ -14,7 +14,9 @@
 #include <cerrno>
 
 #define FUNCTION_LOG 1
+#define STATE_LOG 1
 #define LOG 1
+#define OLD_LOG 0
 #define IP_START 14
 #define TCP_START 34
 #define HEADER_SIZE 54
@@ -23,10 +25,21 @@
 #define RECEIVE_BUFFER_SIZE 2097152 // 2*1024*1024
 #define SEND_BUFFER_SIZE 2097152 // 2*1024*1024
 #define MSS 1460
+#define MAX_DATALOAD 512
 
 #define ACK 16
 #define SYN 2
 #define FIN 1
+
+/* For Timer Calculation */
+#define ALPHA 0.125
+#define BETA 0.25
+#define MS_TO_NS 1000000 // 10^6
+
+// Avoid infinite loop
+#define MAX_PACKET_ARRIVED_CALL 100000
+
+int packet_arrived_call = 0;
 
 namespace E {
 
@@ -43,6 +56,7 @@ void TCPAssignment::finalize() {}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
+
   switch (param.syscallNumber) {
   case SOCKET:
     this->syscall_socket(syscallUUID, pid, param.param1_int, param.param2_int, param.param3_int);
@@ -92,29 +106,67 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
   }
 }
 
+void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt) {
+  Time dev_rtt = (1-BETA) * (socket->dev_rtt) + BETA * abs(sample_rtt - socket->estimated_rtt);
+  Time estimated_rtt = (1-ALPHA) * (socket->estimated_rtt) + ALPHA * sample_rtt;
+  Time timeout_interval = estimated_rtt + 4 * dev_rtt;
+
+  socket->timeout_interval = timeout_interval;
+  socket->dev_rtt = dev_rtt;
+  socket->estimated_rtt = estimated_rtt;
+
+  return;
+}
+
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   if(LOG) {
     printf("\npacketArrived=========================\n");
   }
+  packet_arrived_call++;
+  if(packet_arrived_call > MAX_PACKET_ARRIVED_CALL)
+    exit(1);
   /* Read Packet START */
   assert(fromModule == "IPv4");
 
-
   DataInfo received_info;
-
-
   read_packet_header(&packet, &received_info);
+
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
-  uint8_t flag = received_info.flag;
-  uint32_t seq_num = received_info.seq_num;
-  uint32_t ack_num = received_info.ack_num;
-  uint8_t header_length = received_info.header_length;
 
   std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
-  auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
+  // Checksum Verification
+  uint16_t total_length = received_info.total_length;
+  uint8_t ihl = received_info.ihl;
+  uint8_t data_ofs = received_info.data_ofs;
+  uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+  uint8_t tcp_data[DATA_OFS + data_length];
+  uint32_t ip_msg, remote_ip_msg;
+  uint16_t checksum;
+
+  memset(tcp_data, 0, (DATA_OFS + data_length) * sizeof(uint8_t));
+
+  ip_msg = htonl(local_ip);
+  remote_ip_msg = htonl(remote_ip);
+
+  packet.readData(TCP_START, tcp_data, DATA_OFS + data_length);
+
+  tcp_data[16] = 0;
+  tcp_data[17] = 0;
+
+  checksum = ~ NetworkUtil::tcp_sum(remote_ip_msg, ip_msg, tcp_data, DATA_OFS + data_length);
+
+  if(received_info.checksum != checksum)
+  {
+    // Drop the packet if bit error detected.
+    if(LOG)
+      printf("Bit Error Detected.. Drop the packet.\n");
+    return;
+  }
+
+  auto iter = estab_pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(remote_ip, remote_port));
   if(iter == estab_pid_sockfd_by_ip_port.end())
   {
     iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(0, local_port));
@@ -123,384 +175,249 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         iter = pid_sockfd_by_ip_port.find(std::pair<uint32_t, in_port_t>(local_ip, local_port));
         if (iter == pid_sockfd_by_ip_port.end())
         {
+          if(LOG)
+            printf("Destination socket is not found.\n");
           return;
+          // assert(0);
         }
     }
   }
-
-  int pid, fd;
-  pid = iter->second.first;
-  fd = iter->second.second;
-
-  auto iter2 = sockets.find({pid, fd});
-
-  if(iter2 == sockets.end()){
-    // Error: Socket not found
-    // Not sure
-    return;
-  }
+  auto iter2 = sockets.find({iter->second.first, iter->second.second});
+  assert(iter2 != sockets.end());
 
   auto &s = iter2->second;
+  s.pid = iter->second.first;
+  s.fd = iter->second.second;
 
-  // assert(pid == s.pid);
-
-  /* Write Packet START */
-	Packet new_packet(HEADER_SIZE);
-  write_packet_header_mod(&new_packet, &received_info);
-
-	switch(s.state)
+  switch(s.state)
 	{
 		case INIT_STATE:
-      if(LOG)
-      {
-        printf("  Server's state is ST_READY\n");
-      }
+      manage_init(&packet, &s);
 			break;
-
-		case LISTEN_STATE:	{
-      if(LOG)
-      {
-        printf("  Server's state is ST_LISTEN\n");
-      }
-
-			if(flag & SYN)
-			{
-        DataInfo info;
-        info.local_ip = local_ip; info.local_port = local_port;
-        // TODO: Remove duplicate elements
-        info.local_addr = unit_addr(local_ip, local_port);
-        info.remote_ip = remote_ip; info.remote_port = remote_port;
-        info.remote_addr = unit_addr(remote_ip, remote_port);
-        info.seq_num = rand(); info.ack_num = seq_num + 1;
-        info.flag = SYN | ACK;
-
-        write_packet_response_mod(&new_packet, &info, &received_info);
-
-        data_infos[{pid, fd}] = info;
-
-				sendPacket("IPv4", std::move(new_packet));
-
-				s.state = SYN_RCVD_STATE;
-			}
-			break;
-    }
-
-		case SYN_SENT_STATE: {
-      if(LOG)
-        {
-          printf("  Client's state is ST_SYN_SENT\n");
-        }
-
-  			if((flag & SYN) && (flag & ACK))
-  			{
-          if(LOG)
-          {
-            printf("  Client's state is ST_SYN_SENT\n");
-          }
-
-          DataInfo info;
-          info.local_ip = local_ip; info.local_port = local_port;
-          // TODO: Remove duplicate elements
-          info.local_addr = unit_addr(local_ip, local_port);
-          info.remote_ip = remote_ip; info.remote_port = remote_port;
-          info.remote_addr = unit_addr(remote_ip, remote_port);
-          info.seq_num = seq_num + 1; info.ack_num = seq_num + 1;
-          info.flag = ACK;
-
-          write_packet_response_mod(&new_packet, &info, &received_info);
-
-  				sendPacket("IPv4", std::move(new_packet));
-
-  				s.state = ESTAB_STATE;
-
-          auto iter = blocked_process_table.find(pid);
-          if (iter != blocked_process_table.end()) {
-            auto &process = iter->second;
-						this->returnSystemCall(process.syscallUUID, 0);
-            blocked_process_table.erase(pid);
-        }
-        else {
-          assert(0);
-        }
-			}
-			else if(flag & SYN)
-      {
-        DataInfo info;
-        info.local_ip = local_ip; info.local_port = local_port;
-        // TODO: Remove duplicate elements
-        info.local_addr = unit_addr(local_ip, local_port);
-        info.remote_ip = remote_ip; info.remote_port = remote_port;
-        info.remote_addr = unit_addr(remote_ip, remote_port);
-        info.seq_num = seq_num + 1; info.ack_num = seq_num + 1;
-        info.flag = ACK;
-
-        write_packet_response_mod(&new_packet, &info, &received_info);
-
-        sendPacket("IPv4", std::move(new_packet));
-
-        s.state = SYN_RCVD_STATE;
-
-        auto iter = blocked_process_table.find(pid);
-        if (iter != blocked_process_table.end()) {
-          auto &process = iter->second;
-          this->returnSystemCall(process.syscallUUID, 0);
-          blocked_process_table.erase(pid);
-      }
-    }
-    }
+		case LISTEN_STATE:
+      manage_listen(&packet, &s);
       break;
-
-
-		case SYN_RCVD_STATE: {
-      if(LOG)
-      {
-        printf("  Server's state is ST_SYN_RCVD\n");
-      }
-
-      if(flag & SYN)
-      {
-        if (s.listenQueue->size() + 1 < s.backlog){
-          Packet clone_packet = packet;
-          s.listenQueue->push(clone_packet);
-        }
-        if(LOG)
-        {
-          printf("  Currently working on another socket... Put in Queue\n");
-          printf("  Listen Queue Size: %d\n", s.listenQueue->size());
-        }
-
-        return;
-        break;
-      }
-
-      auto info_it = data_infos.find({pid, fd});
-
-      if (info_it == data_infos.end())
-      {
-        // TODO: Not sure
-        return;
-      }
-
-      auto &info = info_it->second;
-
-      in_addr_t temp_local_ip, temp_remote_ip;
-      in_port_t temp_local_port, temp_remote_port;
-
-      std::tie(temp_local_ip, temp_local_port) = divide_addr(info.local_addr);
-      std::tie(temp_remote_ip, temp_remote_port) = divide_addr(info.remote_addr);
-
-      if(temp_local_ip == local_ip && temp_local_port == local_port &&
-        temp_remote_ip == remote_ip && temp_remote_port == remote_port)
-			{
-
-        if(flag & ACK)
-        {
-          if(LOG)
-          {
-            printf("  Accepting this packet... change server state to ST_LISTEN.\n");
-          }
-
-          auto iter = blocked_process_table.find(pid);
-          if (iter != blocked_process_table.end()) {
-
-            auto &process = iter->second;
-
-						int new_fd = this->createFileDescriptor(pid);
-            if(new_fd < 0)
-            {
-              // Error: File Descriptor not created!
-              return;
-            }
-
-            Socket new_socket;
-            std::tie(new_socket.ip, new_socket.port) = divide_addr(info.local_addr);
-            new_socket.addr = info.local_addr;
-            new_socket.addrlen = sizeof(info.local_addr);
-            new_socket.isBound = true;
-            new_socket.state = ESTAB_STATE;
-            new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
-            new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
-            new_socket.is_rcvd_data = false;
-            new_socket.receive_ptr = new_socket.receive_buffer;
-
-            *process.addr = info.local_addr;
-            *process.addrlen = sizeof(info.local_addr);
-
-            estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {pid, new_fd};
-            sockets[{pid, new_fd}] = new_socket;
-
-						this->returnSystemCall(process.syscallUUID, new_fd);
-            blocked_process_table.erase(pid);
-        }
-        else {
-          s.acceptQueue->push(info);
-        }
-
-        s.state = LISTEN_STATE;
-        if(s.listenQueue->empty()) {
-          return;
-        }
-
-        // Get a packet from listenQueue
-        Packet const& resend_packet = s.listenQueue->front();
-        Packet clone_packet = resend_packet;
-        s.listenQueue->pop();
-        packetArrived("IPv4", std::move(clone_packet));
-
-        return;
-        }
-      }
-    }
+		case SYN_SENT_STATE:
+      manage_synsent(&packet, &s);
       break;
-
-    case ESTAB_STATE: {
-    /*
-    When a data packet arrives (to the TCP layer), you should:
-    copy the payload to the corresponding TCP socket’s receive buffer
-    acknowledge received packet (i.e., send an ACK packet)
-    */
-      printf(" in ESTAB_STATE\n");
-      // (1) Copy the payload
-      s.is_rcvd_data = true;
-
-      uint8_t ihl;
-      uint16_t total_length;
-      packet.readData(IP_START, &ihl, 1);
-      ihl = ihl & 15;
-      printf("ihl %d\n", ihl);
-      // ihl = ntohs(ihl & 15);
-      // printf("ihl %d\n", ihl);
-      total_length = 0;
-      packet.readData(IP_START + 2, &total_length, 2);
-      total_length = ntohs(total_length);
-      printf("total length %d\n", total_length);
-      // total_length = ntohs(total_length);
-
-
-      uint8_t data_ofs;
-      packet.readData(TCP_START + 12, &data_ofs, 1);
-      data_ofs = data_ofs >> 4;
-      printf("Data offset %d\n", data_ofs);
-
-      // data_ofs = ntohs(data_ofs);
-
-      uint16_t data_length = total_length - (ihl + data_ofs) * 4;
-      printf("Data length %d\n", data_length);
-
-
-      packet.readData(TCP_START + data_ofs * 4, s.receive_ptr, data_length);
-      s.receive_ptr += data_length;
-      printf("Ptr Difference %d\n", s.receive_ptr - s.receive_buffer);
-
-      auto iter = blocked_io_table.find({pid, fd});
-      if (iter != blocked_io_table.end()) {
-        auto &p = iter->second;
-        memcpy(p.buf, s.receive_buffer, data_length);
-        this->returnSystemCall(p.syscallUUID, data_length);
-      }
-      // (2) Acknowledge received packet
-      DataInfo info;
-      info.local_ip = local_ip; info.local_port = local_port;
-      info.local_addr = unit_addr(local_ip, local_port);
-      info.remote_ip = remote_ip; info.remote_port = remote_port;
-      info.remote_addr = unit_addr(remote_ip, remote_port);
-      info.seq_num = ack_num; info.ack_num = seq_num + data_length;
-      info.flag = ACK;
-
-      write_packet_response_mod(&new_packet, &info, &received_info);
-
-      sendPacket("IPv4", std::move(new_packet));
+		case SYN_RCVD_STATE:
+      manage_synrcvd(&packet, &s);
       break;
-    }
+    case ESTAB_STATE:
+      manage_estab(&packet, &s);
+      break;
+    case FIN_STATE:
+      manage_fin(&packet, &s);
+      break;
 		default:
+      printf("state: %d\n", s.state);
+      return;
 			assert(0);
 	}
+
+  return;
 }
 
 void TCPAssignment::timerCallback(std::any payload) {
   if(FUNCTION_LOG) {
     printf("timerCallback\n");
   }
-  // Remove below
-  (void)payload;
+  auto timer_info = std::any_cast<Timer_PayLoad_Info>(payload);
+  auto iter = sent_packets.find({timer_info.seq_num, timer_info.ack_num});
+
+  if(iter == sent_packets.end())
+  {
+    return;
+  }
+
+  Packet packet = iter->second;
+  sendPacket("IPv4", std::move(packet));
+
+  Socket &s = sockets[{timer_info.pid, timer_info.fd}];
+  s.timerUUID = this->addTimer(timer_info, timer_info.timeout_interval);
+  return;
 }
 
-/*
-The read() call receives three parameters from the application layer:
-a socket (file) descriptor, a pointer to application’s read buffer,
-and the number of bytes to read from the socket.
-It should return the number of bytes read.
-
-When an application calls read(), the TCP layer is in one of the following two situations:
-(1) If there is already received data in the corresponding TCP socket’s receive buffer,
-the data is copied to the application’s buffer and the call returns immediately.
-(2) If there is no received data, the call blocks until any data is received from the sender.
-When data arrives, the data is copied to the application’s buffer and the call returns.
-*/
-ssize_t TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count)
+void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count)
 {
   if(FUNCTION_LOG) {
-    // printf("(pid: %d) syscall_read\n", pid);
+    printf("(pid: %d) syscall_read\n", pid);
   }
-  Socket s = sockets[{pid, fd}];
-  s.is_rcvd_data = false;
+
+  Socket &s = sockets[{pid, fd}];
+
   if (s.is_rcvd_data){
-      memcpy(buf, s.receive_buffer, count);
-      s.is_rcvd_data = false;
-      this->returnSystemCall(syscallUUID, count);
-      return count;
+      ReadProcess &p = blocked_read_table[{pid, fd}];
+
+      if(s.remaining == 0) {
+          s.is_rcvd_data = false;
+          // blocked_read_table.erase(std::pair<in_addr_t, in_port_t>(pid, fd));
+          this->returnSystemCall(syscallUUID, 0);
+          return;
+      }
+
+      size_t read_byte = count > s.remaining ? s.remaining : count;
+      memcpy(buf, s.data_ptr, read_byte);
+      s.data_ptr += read_byte;
+      s.remaining -= read_byte;
+      this->returnSystemCall(syscallUUID, read_byte);
+      return;
   }
   else {
-      IOProcess read_p;
+      ReadProcess read_p;
       read_p.fd = fd;
       read_p.buf = buf;
       read_p.count = count;
       read_p.syscallUUID = syscallUUID;
-      blocked_io_table[{pid, fd}] = read_p;
-      return count;
+      blocked_read_table[{pid, fd}] = read_p;
+      return;
   }
 }
 
-/*
-The write() call receives three parameters from the application layer:
-a socket (file) descriptor, a pointer to application’s data to write,
-the number of bytes to write to the socket.
-It should return the number of bytes written.
-
-When an application calls write(), the TCP layer is in one of the following two situations:
-
-(1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer. Then,
-  (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
-  (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
-(2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data. When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer and then,
-  (a) if the data is sendable (i.e., the data lies in the sender-side window), send the data and the call returns.
-  (b) if the data is not sendable (i.e., the data lies outside the sender-side window), the call just returns.
-
-*/
-ssize_t TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count)
+void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count)
 {
-  this->returnSystemCall(syscallUUID, fd);
-  return count;
+  if(FUNCTION_LOG) {
+    printf("(pid: %d) syscall_write\n", pid);
+  }
 
-  // Socket s = sockets[{pid, fd}];
-  // if(s.enough_send_space)
-  // {
-  //   // if(data lies in sender window)
-  // }
-  // else
-  // {
-  //
-  // }
-  // return;
+  Socket &s = sockets[{pid, fd}];
+
+  size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
+  size_t prev_count = count;
+  // (1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer.
+  if(s.send_remaining >= count)
+  {
+    // (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
+    if(s.send_ptr + count - s.acked_ptr < s.window)
+    {
+      memcpy(s.send_ptr, buf, count);
+
+      while(count > 0)
+      {
+        // Write Header
+        DataInfo info;
+        info.local_addr = s.local_addr;
+        info.remote_addr = s.remote_addr;
+        if (s.send_ptr == s.send_buffer) {
+          info.seq_num = s.seq_num;
+        }
+        else {
+          info.seq_num = s.seq_num + write_byte;
+          s.seq_num += write_byte;
+        }
+
+        info.ack_num = s.ack_num + 1;
+        info.flag = ACK;
+
+        Packet packet(HEADER_SIZE + write_byte);
+        write_packet_header_without_checksum(&packet, &info);
+
+        // Send Buffer is Full
+        if(s.send_ptr + write_byte - s.send_buffer > SEND_BUFFER_SIZE)
+        {
+          this->returnSystemCall(syscallUUID, -1);
+          return;
+        }
+
+        // Write total_length and payload
+        uint16_t size = write_byte + 4 * (5 + 5);
+        uint8_t total_length = size >> 8;
+        packet.writeData(IP_START + 2, &total_length, 1);
+        total_length = (uint8_t)(size & 0xFF);
+        packet.writeData(IP_START + 3, &total_length, 1);
+        packet.writeData(TCP_START + 20, s.send_ptr, write_byte);
+
+        uint8_t tcp_data[DATA_OFS + write_byte];
+        uint16_t checksum;
+        uint32_t ip_msg, remote_ip_msg;
+        in_addr_t local_ip, remote_ip;
+        in_port_t local_port, remote_port;
+
+        std::tie(local_ip, local_port) = divide_addr(s.local_addr);
+        std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
+
+        ip_msg = htonl(local_ip);
+        remote_ip_msg = htonl(remote_ip);
+
+        packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
+        checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
+        checksum = htons(checksum);
+        packet.writeData(TCP_START + 16, &checksum, 2);
+
+        sendPacket("IPv4", std::move(packet));
+        // Call Timer
+        Packet clone_packet = packet.clone();
+        sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+        s.inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+        if (!s.timer_alive) {
+          Timer_PayLoad_Info timer_info;
+          timer_info.seq_num = info.seq_num;
+          timer_info.ack_num = info.ack_num;
+          timer_info.timeout_interval = s.timeout_interval;
+          timer_info.pid = pid;
+          timer_info.fd = fd;
+          UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
+          s.timerUUID = timerUUID;
+          s.timer_alive = true;
+          s.timer_seq_num = info.seq_num + write_byte;
+          s.sent_time = getCurrentTime();
+        }
+
+        if(OLD_LOG)
+        {
+          printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+        }
+
+        s.seqnumQueue->push({info.seq_num + write_byte, write_byte});
+
+        s.send_ptr += write_byte;
+        s.send_remaining -= write_byte;
+        count -= write_byte;
+        write_byte = write_byte > count ? count : write_byte;
+
+        // For Debugging
+        // DataInfo send_info;
+        // read_packet_header(&packet, &send_info);
+        // printf("ack_num: %d\n", send_info.ack_num);
+        // printf("seq_num: %d\n", send_info.seq_num);
+        // printf("flag: %d\n", send_info.flag);
+        // printf("total_length: %d\n", send_info.total_length);
+      }
+
+      this->returnSystemCall(syscallUUID, prev_count);
+      return;
+    }
+    // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
+    else
+    {
+      // this->returnSystemCall(syscallUUID, 0);
+      WriteProcess p;
+      p.fd = fd;
+      p.buf = buf;
+      p.count =  count;
+      p.syscallUUID = syscallUUID;
+      blocked_write_table[{pid, fd}] = p;
+      return;
+    }
+  }
+  // (2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data.
+  // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
+  else
+  {
+    WriteProcess p;
+    p.fd = fd;
+    p.buf = buf;
+    p.count =  count;
+    p.syscallUUID = syscallUUID;
+    blocked_write_table[{pid, fd}] = p;
+    return;
+  }
+
+  // Not Reached
+  assert(0);
 }
 
-/*
-The socket() call receives 3 parameters from the application layer. Now it should create a file
-descriptor and store the domain and the protocol in the data structure indexed by the file
-descriptor. It returns the file descriptor. More details about the socket call are described at:
-https://linux.die.net/man/2/socket and https://linux.die.net/man/3/socket. In KENS, you need
-to implement only domain AF_INET, type SOCK_STREAM, and protocol IPPROTO_TCP.
-*/
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol)
 {
   if(FUNCTION_LOG) {
@@ -508,14 +425,9 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   }
 
 	assert(domain == AF_INET && type == SOCK_STREAM && protocol == IPPROTO_TCP);
-  if(domain != AF_INET || type != SOCK_STREAM || protocol != IPPROTO_TCP) {
-    errno = EACCES;
-    this->returnSystemCall(syscallUUID, -1);
-  }
 
 	int fd = this->createFileDescriptor(pid);
-  if (fd < 0)
-    return;
+  assert(fd >= 0);
 
   Socket s;
   s.pid = pid;
@@ -528,52 +440,82 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
   s.is_rcvd_data = false;
   s.enough_send_space = true;
-  s.receive_ptr = s.receive_buffer;
+  s.packet_ptr = s.receive_buffer;
+  s.data_ptr = s.receive_buffer;
+  s.remaining = 0;
+  s.is_connected = false;
+  // Fixed window size
+  s.window = WINDOW_SIZE;
+  s.seq_num = 1;
+  s.send_ptr = s.send_buffer;
+  s.acked_ptr = s.send_buffer;
+  s.send_remaining = SEND_BUFFER_SIZE;
+  s.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+  s.estimated_rtt = 100 * MS_TO_NS;
+  s.sent_time = 0;
+  s.timeout_interval = 100 * MS_TO_NS;
+  s.dev_rtt = 0;
+  s.timer_alive = false;
+  s.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+  s.timer_seq_num = 0;
+  s.sent_time = 0;
+  s.retransmit_ack = 0;
+  s.timerUUID = 0;
 
   sockets[{pid, fd}] = s;
 
 	this->returnSystemCall(syscallUUID, fd);
 }
 
-/*
-The close() call receives a parameter from the application layer. It closes the file descriptor’s
-connection and deallocates the file descriptor. More details about the socket call are
-described https://linux.die.net/man/2/close and https://linux.die.net/man/3/close.
-*/
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 {
   if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_close\n", pid);
   }
+
   auto iter = sockets.find({pid, fd});
+  assert(iter != sockets.end());
 
-  if(iter != sockets.end())
+  auto &s = iter->second;
+
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+
+  std::tie(local_ip, local_port) = divide_addr(s.local_addr);
+
+  // Wait until all inflight packets are ACKed
+  if(!s.inflight_packets_info->empty())
   {
-    auto &s = iter->second;
+    // Block
+    CloseProcess p;
+    p.fd = fd;
+    p.syscallUUID = syscallUUID;
+    // No need for using buf and count
+    blocked_close_table[{pid, fd}] = p;
 
-    in_addr_t ip;
-    in_port_t port;
-
-    ip = s.ip;
-    port = s.port;
-
-    // Free malloced memory in syscall_socket
-    free(s.receive_buffer);
-    free(s.send_buffer);
-
-    sockets.erase(iter);
-    pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(ip, port));
+    return;
   }
+
+  // For cases where s.remote_addr is uninitialized
+  if(s.is_connected)
+  {
+    std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
+    estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
+  }
+
+
+  pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
+
+  // Free malloced memory in syscall_socket
+  free(s.receive_buffer);
+  free(s.send_buffer);
+
+  sockets.erase(iter);
 
 	this->removeFileDescriptor(pid, fd);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
-/*
-The connect() call receives 3 parameters from the application layer. It connects the file
-descriptor to the address specified by addr. More details about the socket call are described
-https://linux.die.net/man/2/connect and https://linux.die.net/man/3/connect.
-*/
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
@@ -591,7 +533,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   blocked_process_table[pid] = p;
 
   auto &s = iter->second;
-  s.connect_addr = *addr;
+  s.remote_addr = *addr;
 
   in_addr_t remote_ip, local_ip;
   in_port_t remote_port, local_port;
@@ -605,16 +547,12 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
   ipv4_t converted_remote_ip;
 
-  sscanf(remote_ip_buffer, "%d.%d.%d.%d", &converted_remote_ip[0],
+  sscanf(remote_ip_buffer, "%c.%c.%c.%c", &converted_remote_ip[0],
     &converted_remote_ip[1], &converted_remote_ip[2], &converted_remote_ip[3]);
 
-  if (!s.isBound){
-
+  if (!s.isBound) {
   	int table_port = getRoutingTable(converted_remote_ip);
-    printf("TABLE_PORT: %d\n", table_port);
-
     std::optional<ipv4_t> local_ip_array = getIPAddr(table_port);
-
     assert(local_ip_array.has_value() == true);
 
     char local_ip_buffer[20];
@@ -636,30 +574,28 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
             && pid_sockfd_by_ip_port.find({0, local_port}) == pid_sockfd_by_ip_port.end())
   			break;
     }
-
     pid_sockfd_by_ip_port[{local_ip, local_port}] = {pid, sockfd};
-    s.ip = local_ip;
-    s.port = local_port;
+
     s.isBound = true;
-    s.addr = unit_addr(local_ip, local_port);
-    // Not Sure
-    s.addrlen = sizeof(s.addr);
+    s.local_addr = unit_addr(local_ip, local_port);
   }
   else {
-    local_ip = s.ip;
-    local_port = s.port;
+    std::tie(local_ip, local_port) = divide_addr(s.local_addr);
   }
+
   in_addr_t local_ip_converted = htonl(local_ip);
   in_addr_t remote_ip_converted = htonl(remote_ip);
+
   Packet packet(HEADER_SIZE);
 
+  // TODO: Simplify here
   /* Writing Packet */
-  uint32_t rand_num = rand();
-  uint32_t seq_num = htonl(rand_num);
+  uint32_t seq_num = htonl(rand());
   uint8_t flag = SYN;
+
   packet.writeData(TCP_START + 4, &seq_num, 4);
   packet.writeData(TCP_START + 13, &flag, 1);
-  write_packet_header(&packet, IP_START, TCP_START, local_ip,
+  write_packet_header_mod(&packet, IP_START, TCP_START, local_ip,
     remote_ip, local_port, remote_port);
 
   uint8_t tcp_data[DATA_OFS];
@@ -669,47 +605,40 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   uint16_t checksum_converted = htons(checksum);
   packet.writeData(TCP_START + 16, &checksum_converted, 2);
   /* Writing packet finished */
-
   sendPacket("IPv4", std::move(packet));
+  // Add timer
+  // Just a temporary value
+  uint32_t ack_num = 0;
+  Packet clone_packet = packet.clone();
+  // Packet clone_packet(HEADER_SIZE) = packet;
+  // sent_packets.insert(std::pair<std::pair<uint32_t, uint32_t>, Packet>((seq_num, ack_num), clone_packet));
+  // sent_packets[{seq_num, ack_num}] = clone_packet;
+  sent_packets.insert({{seq_num, ack_num}, clone_packet});
+
+  Timer_PayLoad_Info timer_info;
+  timer_info.seq_num = seq_num;
+  timer_info.ack_num = ack_num;
+  timer_info.timeout_interval = s.timeout_interval;
+  timer_info.pid = pid;
+  timer_info.fd = sockfd;
+  UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
+  s.timerUUID = timerUUID;
   s.state = SYN_SENT_STATE;
+
   return;
 }
 
-/*
-The listen() call receives 2 parameters from the application layer. It marks the socket as a
-passive socket, that is, as a socket that will be used to accept incoming connection requests
-using accept. KENS requires you to implement the backlog parameter. It defines the
-maximum length to which the queue of pending connections for sockfd may grow. More
-details about the socket call are described https://linux.die.net/man/2/listen and
-https://linux.die.net/man/3/listen.
-*/
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
   if(FUNCTION_LOG) {
     printf("(pid: %d) syscall_listen\n", pid);
   }
+
 	auto sock_it = sockets.find({pid, sockfd});
-
-	if(sock_it == sockets.end()) {
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-
-  if(sock_it->second.isBound == false) {
-    this->returnSystemCall(syscallUUID, -1);
-		return;
-  }
-
-  if(backlog > 128 || backlog <= 0)
-  {
-    if(LOG)
-    {
-      printf("Unexpected backlog value");
-    }
-    this->returnSystemCall(syscallUUID, -1);
-    return;
-  }
+  assert(sock_it != sockets.end());
+  assert(sock_it->second.isBound == true);
+  assert(backlog > 0 && backlog < 127);
 
   auto &s = sock_it->second;
 
@@ -721,13 +650,6 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
   this->returnSystemCall(syscallUUID, 0);
 }
 
-/*
-The accept() call receives 3 parameters from the application layer. It extracts the first
-connection on the queue of pending connections. It creates and returns a new file descriptor
-for the connection. It also fills the address parameter with connecting client’s information.
-More details about the socket call are described https://linux.die.net/man/2/accept and
-https://linux.die.net/man/3/accept .
-*/
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
@@ -736,18 +658,12 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   }
 
   auto sock_it = sockets.find({pid, sockfd});
-  if(sock_it == sockets.end())
-  {
-    this->returnSystemCall(syscallUUID, -1);
-    return;
-  }
+  assert(sock_it != sockets.end());
 
   auto &s = sock_it->second;
 
   int fd = this->createFileDescriptor(pid);
-
-  if (fd < 0)
-    return;
+  assert(fd >= 0);
 
   if(s.acceptQueue->empty())
   {
@@ -766,34 +682,49 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   s.acceptQueue->pop();
 
   Socket new_socket;
-  std::tie(new_socket.ip, new_socket.port) = divide_addr(info.local_addr);
-  new_socket.addr = info.local_addr;
-  new_socket.addrlen = sizeof(info.local_addr);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  std::tie(local_ip, local_port) = divide_addr(info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(info.remote_addr);
+
   new_socket.isBound = true;
   new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
   new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
   new_socket.is_rcvd_data = false;
-  new_socket.receive_ptr = new_socket.receive_buffer;
+  new_socket.packet_ptr = new_socket.receive_buffer;
+  new_socket.data_ptr = new_socket.receive_buffer;
+  new_socket.remaining = 0;
+  new_socket.window = WINDOW_SIZE;
+  new_socket.seq_num = 1;
+  new_socket.send_ptr = new_socket.send_buffer;
+  new_socket.acked_ptr = new_socket.send_buffer;
+  new_socket.local_addr = info.local_addr;
+  new_socket.remote_addr = info.remote_addr;
+  new_socket.is_connected = true;
+  new_socket.send_remaining = SEND_BUFFER_SIZE;
+  new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+  new_socket.estimated_rtt = 100 * MS_TO_NS;
+  new_socket.timeout_interval = 100 * MS_TO_NS;
+  new_socket.dev_rtt = 0;
+  new_socket.sent_time = 0;
+  new_socket.expect_ack_num = info.seq_num;
+  new_socket.timer_alive = false;
+  new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+  new_socket.sent_time = 0;
+  new_socket.timer_seq_num = 0;
+  new_socket.retransmit_ack = 0;
+  new_socket.timerUUID = 0;
+
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
 
   sockets[{pid, fd}] = new_socket;
-  estab_pid_sockfd_by_ip_port[{new_socket.ip, new_socket.port}] = {pid, fd};
+  estab_pid_sockfd_by_ip_port[{remote_ip, remote_port}] = {pid, fd};
 
   this->returnSystemCall(syscallUUID, fd);
 }
 
-/*
-The bind() call receives 3 parameters from the application layer. Now it should assign an
-address to the socket. More details about the socket call are described
-https://linux.die.net/man/2/bind and https://linux.die.net/man/3/bind .
-In KENS, you need to implement only sockaddr_in type for sockaddr.
-
-The only value you should assign to sin_family is AF_INET. The two fields, sin_port and
-sin_addr, must follow the network byte order. The sin_addr field must be either an IP
-address or INADDR_ANY. You should implement both cases.
-*/
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
@@ -828,27 +759,16 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	if (iter2 != pid_sockfd_by_ip_port.end())
     this->returnSystemCall(syscallUUID, -1);
 
-
   auto &s = iter->second;
 
+  s.local_addr = *addr;
   s.isBound = true;
-  s.ip = ip;
-  s.port = port;
-  s.addr = *addr;
-  s.addrlen = addrlen;
 
   pid_sockfd_by_ip_port[std::pair<in_addr_t, in_port_t>(ip, port)] = {pid, sockfd};
 
 	this->returnSystemCall(syscallUUID, 0);
 }
 
-/*
-The getsockname() call receives 3 parameters from the application layer. It should return the
-current address to which the socket is bound. More details about the socket call are
-described https://linux.die.net/man/2/getsockname and
-https://linux.die.net/man/3/getsockname. As in the case of bind(), you need to implement
-only the sockaddr_in type for sockaddr.
-*/
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
@@ -872,35 +792,773 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 
   auto &s = iter->second;
 
-  *addr = s.addr;
-  *addrlen = s.addrlen;
+  *addr = s.local_addr;
+  *addrlen = sizeof(s.local_addr);
 
 	this->returnSystemCall(syscallUUID, 0);
 }
 
-/*
-getpeername() returns the address of the peer connected to the
-socket sockfd, in the buffer pointed to by addr.  The addrlen
-argument should be initialized to indicate the amount of space
-pointed to by addr.  On return it contains the actual size of the
-name returned (in bytes).  The name is truncated if the buffer
-provided is too small.
-
-The returned address is truncated if the buffer provided is too
-small; in this case, addrlen will return a value greater than was
-supplied to the call.
-*/
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	auto &s = sockets[{pid, sockfd}];
-  *addr = s.connect_addr;
-  *addrlen = sizeof(s.connect_addr);
+  *addr = s.remote_addr;
+  *addrlen = sizeof(s.remote_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
-/* Utility Functions For Packet Manipulation */
+/* Packet Handling Functions */
+void TCPAssignment::manage_init(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_init\n");
+  }
+  return;
+}
 
+void TCPAssignment::manage_listen(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_listen\n");
+  }
+  DataInfo received_info;
+  read_packet_header(packet, &received_info);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t flag = received_info.flag;
+  uint32_t seq_num = received_info.seq_num;
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  if(!(flag & SYN)) return;
+
+  DataInfo info;
+  info.local_addr = unit_addr(local_ip, local_port);
+  info.remote_addr = unit_addr(remote_ip, remote_port);
+  info.seq_num = rand(); info.ack_num = seq_num + 1;
+  info.flag = SYN | ACK;
+
+  Packet new_packet(HEADER_SIZE);
+
+  // printf("Initial past ack_num %d\n", socket->past_ack_num);
+  write_packet_header(&new_packet, &info);
+  data_infos[{socket->pid, socket->fd}] = info;
+  sendPacket("IPv4", std::move(new_packet));
+
+  // socket->sent_time = getCurrentTime();
+  socket->state = SYN_RCVD_STATE;
+  Packet clone_packet = new_packet.clone();
+  sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+  socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+  if (!socket->timer_alive) {
+    Timer_PayLoad_Info timer_info;
+    timer_info.seq_num = info.seq_num;
+    timer_info.ack_num = info.ack_num;
+    timer_info.timeout_interval = socket->timeout_interval;
+    timer_info.pid = socket->pid;
+    timer_info.fd = socket->fd;
+    UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+    socket->timerUUID = timerUUID;
+    socket->timer_alive = true;
+    socket->sent_time = getCurrentTime();
+    socket->timer_seq_num = info.seq_num+1;
+  }
+  return;
+}
+
+void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_synsent\n");
+  }
+  DataInfo received_info;
+  this->cancelTimer(socket->timerUUID);
+  read_packet_header(packet, &received_info);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t flag = received_info.flag;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
+  socket->seq_num = ack_num;
+  socket->ack_num = seq_num;
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  // TODO: Remove duplicatation in code
+  if(flag & SYN)
+  {
+    DataInfo info;
+    info.local_addr = unit_addr(local_ip, local_port);
+    info.remote_addr = unit_addr(remote_ip, remote_port);
+    info.seq_num = ack_num; info.ack_num = seq_num + 1;
+    info.flag = ACK;
+
+    Packet new_packet(HEADER_SIZE);
+    write_packet_header(&new_packet, &info);
+    sendPacket("IPv4", std::move(new_packet));
+
+    Packet clone_packet = new_packet.clone();
+    sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+    socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+    if (!socket->timer_alive) {
+      Timer_PayLoad_Info timer_info;
+      timer_info.seq_num = info.seq_num;
+      timer_info.ack_num = info.ack_num;
+      timer_info.timeout_interval = socket->timeout_interval;
+      timer_info.pid = socket->pid;
+      timer_info.fd = socket->fd;
+      UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+      socket->timerUUID = timerUUID;
+      socket->timer_alive = true;
+      socket->sent_time = getCurrentTime();
+      socket->timer_seq_num = info.seq_num+1;
+    }
+
+    // Send first payload here
+    socket->remote_addr =received_info.remote_addr;
+    socket->local_addr = received_info.local_addr;
+    // Not Sure
+    // socket->expect_ack_num = info.seq_num;
+
+    if(flag & ACK) {
+      socket->state = ESTAB_STATE;
+      socket->is_connected = true;
+      socket->expect_ack_num = seq_num + 1;
+
+      estab_pid_sockfd_by_ip_port[{remote_ip, remote_port}] = {socket->pid, socket->fd};
+    }
+    else socket->state = SYN_SENT_STATE;
+
+    auto iter = blocked_process_table.find(socket->pid);
+
+    if(iter == blocked_process_table.end())
+      return;
+
+    auto &process = iter->second;
+    this->returnSystemCall(process.syscallUUID, 0);
+    blocked_process_table.erase(socket->pid);
+  }
+  else {
+    return;
+  }
+
+  return;
+}
+
+void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_synrcvd\n");
+  }
+  DataInfo received_info;
+  read_packet_header(packet, &received_info);
+
+  // Time sample_rtt = getCurrentTime() - socket->sent_time;
+  // calculate_timeout_interval(socket, sample_rtt);
+
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t flag = received_info.flag;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  if(flag & SYN) {
+    if (socket->listenQueue->size() + 1 < socket->backlog) {
+      Packet clone_packet = *packet;
+      socket->listenQueue->push(clone_packet);
+      if(LOG)
+        printf("Early return 0");
+      return;
+    }
+  }
+
+  this->cancelTimer(socket->timerUUID);
+  Time sample_rtt = getCurrentTime() - socket->sent_time;
+  calculate_timeout_interval(socket, sample_rtt);
+
+  auto info_it = data_infos.find({socket->pid, socket->fd});
+
+  if(info_it == data_infos.end())
+  {
+    //socket->state = LISTEN_STATE;
+    if(LOG)
+      printf("Early return 1");
+    return;
+  }
+
+  if(LOG)
+    printf("SEG FAULT SEARCH 1\n");
+
+  auto &info = info_it->second;
+
+  in_addr_t temp_local_ip, temp_remote_ip;
+  in_port_t temp_local_port, temp_remote_port;
+  std::tie(temp_local_ip, temp_local_port) = divide_addr(info.local_addr);
+  std::tie(temp_remote_ip, temp_remote_port) = divide_addr(info.remote_addr);
+
+  if(temp_local_ip != local_ip || temp_remote_ip != remote_ip ||
+    temp_local_port != local_port || temp_remote_port != remote_port) {
+      if(LOG)
+        printf("Early return 2");
+      return;
+  }
+
+  if(!(flag & ACK))
+  {
+    if(LOG)
+      printf("Unexpected Flag in manage_synrcvd");
+    // socket->state = LISTEN_STATE;
+    return;
+  }
+
+  auto iter = blocked_process_table.find(socket->pid);
+  if(iter != blocked_process_table.end()) {
+    auto &process = iter->second;
+    int new_fd = this->createFileDescriptor(socket->pid);
+    assert(new_fd >= 0);
+
+    Socket new_socket;
+    in_addr_t local_ip, remote_ip;
+    in_port_t local_port, remote_port;
+    std::tie(local_ip, local_port) = divide_addr(info.local_addr);
+    std::tie(remote_ip,remote_port) = divide_addr(info.remote_addr);
+
+    new_socket.isBound = true;
+    new_socket.state = ESTAB_STATE;
+    new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
+    new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+    new_socket.is_rcvd_data = false;
+    new_socket.data_ptr = new_socket.receive_buffer;
+    new_socket.packet_ptr = new_socket.receive_buffer;
+    new_socket.remaining = 0;
+    new_socket.window = 51200;
+    new_socket.seq_num = ack_num;
+    new_socket.ack_num = seq_num + 1;
+    new_socket.send_ptr = new_socket.send_buffer;
+    new_socket.acked_ptr = new_socket.send_buffer;
+    new_socket.local_addr = info.local_addr;
+    new_socket.remote_addr = info.remote_addr;
+    new_socket.is_connected = true;
+    new_socket.send_remaining = SEND_BUFFER_SIZE;
+    new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+    new_socket.estimated_rtt = 100 * MS_TO_NS;
+    new_socket.timeout_interval = 100 * MS_TO_NS;
+    new_socket.dev_rtt = 0;
+    new_socket.sent_time = 0;
+    new_socket.expect_ack_num = seq_num;
+    new_socket.timer_alive;
+    new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+    new_socket.sent_time = 0;
+    new_socket.timer_seq_num = 0;
+    new_socket.retransmit_ack = 0;
+    new_socket.timerUUID = 0;
+
+    *process.addr = info.local_addr;
+    *process.addrlen = sizeof(info.local_addr);
+
+    estab_pid_sockfd_by_ip_port[{remote_ip, remote_port}] = {socket->pid, new_fd};
+    sockets[{socket->pid, new_fd}] = new_socket;
+
+    this->returnSystemCall(process.syscallUUID, new_fd);
+    blocked_process_table.erase(socket->pid);
+  }
+  else {
+    socket->acceptQueue->push(info);
+  }
+
+  socket->state = LISTEN_STATE;
+  if(socket->listenQueue->empty()) {
+    if(LOG)
+      printf("Early return 3");
+    return;
+  }
+
+  // Get a packet from listenQueue
+  Packet const& resend_packet = socket->listenQueue->front();
+  Packet clone_packet = resend_packet;
+  socket->listenQueue->pop();
+  packetArrived("IPv4", std::move(clone_packet));
+
+  return;
+}
+
+void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_estab\n");
+  }
+  DataInfo received_info;
+  read_packet_header(packet, &received_info);
+  this->cancelTimer(socket->timerUUID);
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint32_t seq_num = received_info.seq_num;
+  uint32_t ack_num = received_info.ack_num;
+  uint8_t data_ofs = received_info.data_ofs;
+  uint8_t flag = received_info.flag;
+  uint16_t total_length = received_info.total_length;
+  uint8_t ihl = received_info.ihl;
+
+  std::tie(local_ip, local_port) = divide_addr(received_info.local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
+
+  socket->remote_addr = received_info.remote_addr;
+  socket->local_addr = received_info.local_addr;
+
+  uint16_t data_length = total_length - (ihl + data_ofs) * 4;
+  int data_start = TCP_START + data_ofs * 4;
+
+  // Handle data packet
+  if(data_length != 0)
+  {
+    // Fast retransmit
+    if(seq_num != socket->expect_ack_num)
+    {
+      DataInfo info;
+      info.local_addr = unit_addr(local_ip, local_port);
+      info.remote_addr = unit_addr(remote_ip, remote_port);
+      info.seq_num = ack_num; info.ack_num = socket->expect_ack_num;
+      info.flag = ACK;
+
+      Packet new_packet(HEADER_SIZE);
+      write_packet_header(&new_packet, &info);
+      sendPacket("IPv4", std::move(new_packet));
+      return;
+    }
+
+    socket->expect_ack_num = seq_num + data_length;
+
+    auto pkt_iter = unique_packets.find({seq_num, ack_num});
+
+    if(pkt_iter == unique_packets.end())
+    {
+      unique_packets.insert({seq_num, ack_num});
+    }
+    else
+    {
+      // Send ACK for duplicated packet
+      DataInfo info;
+      info.local_addr = unit_addr(local_ip, local_port);
+      info.remote_addr = unit_addr(remote_ip, remote_port);
+      info.seq_num = ack_num; info.ack_num = seq_num + data_length;
+      info.flag = ACK;
+
+      Packet new_packet(HEADER_SIZE);
+      write_packet_header(&new_packet, &info);
+      sendPacket("IPv4", std::move(new_packet));
+      return;
+    }
+
+    // (1) Copy the payload
+    for(int i=0; i<data_length; i++) {
+      packet->readData(data_start + i, socket->packet_ptr + i, 1);
+    }
+    // TODO: what if packet_ptr go over receive_buffer?
+    socket->packet_ptr += data_length;
+    socket->remaining += data_length;
+
+    auto iter = blocked_read_table.find({socket->pid, socket->fd});
+    if (iter != blocked_read_table.end()) {
+      auto &p = iter->second;
+
+      if(p.count < data_length)
+        socket->is_rcvd_data = true;
+
+      size_t read_byte = p.count > data_length ? data_length : p.count;
+
+      // What if buffer size is smaller than p.count?
+      memcpy(p.buf, socket->data_ptr, read_byte);
+      socket->data_ptr += read_byte;
+      socket->remaining -= read_byte;
+      this->returnSystemCall(p.syscallUUID, read_byte);
+    }
+
+    // (2) Acknowledge received packet
+    DataInfo info;
+    info.local_addr = unit_addr(local_ip, local_port);
+    info.remote_addr = unit_addr(remote_ip, remote_port);
+    info.seq_num = ack_num; info.ack_num = seq_num + data_length;
+    info.flag = ACK;
+
+    Packet new_packet(HEADER_SIZE);
+    write_packet_header(&new_packet, &info);
+    sendPacket("IPv4", std::move(new_packet));
+    // socket->sent_time = getCurrentTime();
+  }
+  else if((flag & ACK) && (flag & FIN))
+  {
+    assert(data_length == 0);
+    if(LOG)
+    {
+      printf("FIN ACK packet received\n");
+    }
+    socket->state = FIN_STATE;
+    return;
+  }
+  // Handle ACK packet
+  else if((flag & ACK) && (data_length == 0))
+  {
+    if(socket->seqnumQueue->empty())
+    {
+      if(LOG)
+        printf("Manage estab early return 0");
+      return;
+    }
+
+    auto &target = socket->seqnumQueue->front();
+
+    int diff = ack_num - target.first;
+
+    if(socket->timer_seq_num == ack_num)
+    {
+      // TIMER UPDATE
+      Time current_time = getCurrentTime();
+      Time sample_rtt = current_time - socket->sent_time;
+      calculate_timeout_interval(socket, sample_rtt);
+      printf("socket timeout_interval %d\n", socket->timeout_interval);
+    }
+    // printf("target.first %u ack_num %u\n", target.first, ack_num);
+
+    if(target.first > ack_num)
+    {
+      // printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
+      // Send all pakcets in inflight_packets_info
+      if(socket->retransmit_ack == ack_num)
+      {
+        return;
+      }
+
+      socket->retransmit_ack = ack_num;
+
+      // Cancel Timer
+      this->cancelTimer(socket->timerUUID);
+      socket->timer_alive = false;
+
+      auto iter = socket->inflight_packets_info->begin();
+
+      uint32_t first_seq_num = socket->inflight_packets_info->front().first;
+      uint32_t first_ack_num = socket->inflight_packets_info->front().second;
+
+      for(iter; iter!= socket->inflight_packets_info->end(); iter++) {
+        auto piter = sent_packets.find({iter->first, iter->second});
+        if( piter == sent_packets.end() )
+        {
+          assert(0);
+        }
+        Packet packet = (piter->second).clone();
+        // Resent Packet
+        sendPacket("IPv4", std::move(packet));
+      }
+
+      Timer_PayLoad_Info timer_info;
+      timer_info.seq_num = first_seq_num;
+      timer_info.ack_num = first_ack_num;
+      timer_info.timeout_interval = socket->timeout_interval;
+      timer_info.pid = socket->pid;
+      timer_info.fd = socket->fd;
+      UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+      socket->timerUUID = timerUUID;
+      socket->timer_alive = true;
+      return;
+    }
+
+    // Cancel Timer
+    this->cancelTimer(socket->timerUUID);
+    socket->timer_alive = false;
+
+    assert(diff >= 0);
+    socket->acked_ptr += (diff + target.second);
+
+    while(socket->seqnumQueue->front().first != ack_num)
+      socket->seqnumQueue->pop();
+    socket->seqnumQueue->pop();
+
+    while(socket->inflight_packets_info->front().first < ack_num)
+    {
+      socket->inflight_packets_info->pop_front();
+      if(socket->inflight_packets_info->empty())
+        break;
+    }
+    // printf("inflight_packets_info front ack %d, ack_num %d\n", socket->inflight_packets_info->front().first, ack_num);
+    // printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
+
+    auto biter = blocked_close_table.find({socket->pid, socket->fd});
+
+    if (biter != blocked_close_table.end())
+    {
+      if(socket->inflight_packets_info->empty())
+      {
+        auto &p = biter->second;
+
+        // Remaining syscall_close procedure
+        // For cases where s.remote_addr is uninitialized
+        if(socket->is_connected)
+        {
+          std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
+          estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
+        }
+
+        pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
+
+        // Free malloced memory in syscall_socket
+        // delete queues and lists
+        free(socket->receive_buffer);
+        free(socket->send_buffer);
+
+        sockets.erase({socket->pid, socket->fd});
+
+      	this->removeFileDescriptor(socket->pid, socket->fd);
+      	this->returnSystemCall(p.syscallUUID, 0);
+        return;
+      }
+      else
+      {
+        // Writing is Done. Only Receiving ACK is enough.
+        return;
+      }
+    }
+
+    auto iter = blocked_write_table.find({socket->pid, socket->fd});
+    if (iter != blocked_write_table.end())
+    {
+      auto &p = iter->second;
+      if(socket->acked_ptr == socket->send_ptr)
+      {
+        if (socket->remaining >= p.count) assert(0);
+
+        socket->send_ptr = socket->send_buffer;
+        socket->acked_ptr = socket->send_buffer;
+
+        size_t count = p.count;
+        size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
+        size_t prev_count = count;
+        const void *buf = p.buf;
+
+        if(socket->send_ptr + count - socket->acked_ptr < socket->window)
+        {
+          memcpy(socket->send_ptr, buf, count);
+
+          while(count > 0)
+          {
+            // Write Header
+            DataInfo info;
+            info.local_addr = socket->local_addr;
+            info.remote_addr = socket->remote_addr;
+            if (socket->send_ptr == socket->send_buffer) {
+              info.seq_num = socket->seq_num;
+            }
+            else {
+              info.seq_num = socket->seq_num + write_byte;
+              socket->seq_num += write_byte;
+            }
+
+            info.ack_num = socket->ack_num + 1;
+            info.flag = ACK;
+
+            Packet packet(HEADER_SIZE + write_byte);
+            write_packet_header_without_checksum(&packet, &info);
+
+            // Send Buffer is Full
+            if(socket->send_ptr + write_byte - socket->send_buffer > SEND_BUFFER_SIZE)
+            {
+              this->returnSystemCall(p.syscallUUID, -1);
+              return;
+            }
+
+            // Write total_length and payload
+            uint16_t size = write_byte + 4 * (5 + 5);
+            uint8_t total_length = size >> 8;
+            packet.writeData(IP_START + 2, &total_length, 1);
+            total_length = (uint8_t)(size & 0xFF);
+            packet.writeData(IP_START + 3, &total_length, 1);
+            packet.writeData(TCP_START + 20, socket->send_ptr, write_byte);
+
+            uint8_t tcp_data[DATA_OFS + write_byte];
+            uint16_t checksum;
+            uint32_t ip_msg, remote_ip_msg;
+            in_addr_t local_ip, remote_ip;
+            in_port_t local_port, remote_port;
+
+            std::tie(local_ip, local_port) = divide_addr(socket->local_addr);
+            std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
+
+            ip_msg = htonl(local_ip);
+            remote_ip_msg = htonl(remote_ip);
+
+            packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
+            checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
+            checksum = htons(checksum);
+            packet.writeData(TCP_START + 16, &checksum, 2);
+
+            sendPacket("IPv4", std::move(packet));
+
+            // Reset Timer
+            Packet clone_packet = packet.clone();
+            sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+            socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+            if (!socket->timer_alive) {
+              Timer_PayLoad_Info timer_info;
+              timer_info.seq_num = info.seq_num;
+              timer_info.ack_num = info.ack_num;
+              timer_info.timeout_interval = socket->timeout_interval;
+              timer_info.pid = socket->pid;
+              timer_info.fd = socket->fd;
+              UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+              socket->timerUUID = timerUUID;
+              socket->timer_alive = true;
+              socket->sent_time = getCurrentTime();
+              socket->timer_seq_num = info.seq_num + write_byte;
+            }
+
+            if(OLD_LOG)
+              printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+
+            socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
+            socket->send_ptr += write_byte;
+            socket->send_remaining -= write_byte;
+            count -= write_byte;
+            write_byte = write_byte > count ? count : write_byte;
+          }
+
+          this->returnSystemCall(p.syscallUUID, prev_count);
+          return;
+        }
+        // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
+        else
+        {
+          assert(0);
+        }
+        this->returnSystemCall(p.syscallUUID, -1);
+      }
+      else if(socket->send_ptr + p.count - socket->acked_ptr < socket->window)
+      {
+        size_t count = p.count;
+        size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
+        size_t prev_count = count;
+        const void *buf = p.buf;
+
+        memcpy(socket->send_ptr, buf, count);
+
+        while(count > 0)
+        {
+          // Write Header
+          DataInfo info;
+          info.local_addr = socket->local_addr;
+          info.remote_addr = socket->remote_addr;
+          if (socket->send_ptr == socket->send_buffer) {
+            info.seq_num = socket->seq_num;
+          }
+          else {
+            info.seq_num = socket->seq_num + write_byte;
+            socket->seq_num += write_byte;
+          }
+
+          info.ack_num = socket->ack_num + 1;
+          info.flag = ACK;
+
+          Packet packet(HEADER_SIZE + write_byte);
+          write_packet_header_without_checksum(&packet, &info);
+
+          // Send Buffer is Full
+          if(socket->send_ptr + write_byte - socket->send_buffer > SEND_BUFFER_SIZE)
+          {
+            this->returnSystemCall(p.syscallUUID, -1);
+            return;
+          }
+
+          // Write total_length and payload
+          uint16_t size = write_byte + 4 * (5 + 5);
+          uint8_t total_length = size >> 8;
+          packet.writeData(IP_START + 2, &total_length, 1);
+          total_length = (uint8_t)(size & 0xFF);
+          packet.writeData(IP_START + 3, &total_length, 1);
+          packet.writeData(TCP_START + 20, socket->send_ptr, write_byte);
+
+          uint8_t tcp_data[DATA_OFS + write_byte];
+          uint16_t checksum;
+          uint32_t ip_msg, remote_ip_msg;
+          in_addr_t local_ip, remote_ip;
+          in_port_t local_port, remote_port;
+
+          std::tie(local_ip, local_port) = divide_addr(socket->local_addr);
+          std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
+
+          ip_msg = htonl(local_ip);
+          remote_ip_msg = htonl(remote_ip);
+
+          packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
+          checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
+          checksum = htons(checksum);
+          packet.writeData(TCP_START + 16, &checksum, 2);
+
+          sendPacket("IPv4", std::move(packet));
+
+          // Reset Timer
+          Packet clone_packet = packet.clone();
+          sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+
+          socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+          if (!socket->timer_alive) {
+            Timer_PayLoad_Info timer_info;
+            timer_info.seq_num = seq_num;
+            timer_info.ack_num = ack_num;
+            timer_info.timeout_interval = socket->timeout_interval;
+            timer_info.pid = socket->pid;
+            timer_info.fd = socket->fd;
+            UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+            socket->timerUUID = timerUUID;
+            socket->timer_alive = true;
+            socket->sent_time = getCurrentTime();
+            socket->timer_seq_num = info.seq_num + write_byte;
+          }
+
+          if(LOG)
+            printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+          socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
+
+          socket->send_ptr += write_byte;
+          socket->send_remaining -= write_byte;
+          count -= write_byte;
+          write_byte = write_byte > count ? count : write_byte;
+        }
+        this->returnSystemCall(p.syscallUUID, prev_count);
+      }
+    }
+  }
+  else
+  {
+    assert(0);
+    return;
+  }
+
+  return;
+}
+
+void TCPAssignment::manage_fin(Packet *packet, Socket *socket)
+{
+  if(STATE_LOG)
+  {
+    printf("manage_fin\n");
+  }
+
+  return;
+}
+
+/* Utility Functions For Packet Manipulation */
 std::pair<in_addr_t, in_port_t> TCPAssignment::divide_addr(sockaddr addr)
 {
   in_addr_t ip;
@@ -923,70 +1581,129 @@ sockaddr TCPAssignment::unit_addr(in_addr_t ip, in_port_t port)
 
 void TCPAssignment::read_packet_header(Packet *packet, DataInfo *info)
 {
-  uint32_t ip_msg;
-	uint16_t port_msg;
-  uint32_t seq_num_msg;
-  uint32_t ack_num_msg;
-  uint8_t header_length_msg;
-  uint8_t flag_msg;
-
+  uint32_t ip_msg, remote_ip_msg, seq_num_msg, ack_num_msg;
+	uint16_t port_msg, remote_port_msg, total_length;
+  uint8_t flag_msg, ihl, data_ofs;
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
+  uint16_t checksum;
 
-  packet->readData(IP_START + 12, &ip_msg, 4);
-	packet->readData(TCP_START + 0, &port_msg, 2);
-  remote_ip = (in_addr_t)ntohl(ip_msg);
-  remote_port = (in_port_t)ntohs(port_msg);
-
-  info->remote_addr = unit_addr(remote_ip, remote_port);
-
+  packet->readData(IP_START, &ihl, 1);
+  packet->readData(IP_START + 2, &total_length, 2);
+  packet->readData(IP_START + 12, &remote_ip_msg, 4);
   packet->readData(IP_START + 16, &ip_msg, 4);
-	packet->readData(TCP_START + 2, &port_msg, 2);
-  local_ip = (in_addr_t)ntohl(ip_msg);
-  local_port = (in_port_t)ntohs(port_msg);
+	packet->readData(TCP_START + 0, &remote_port_msg, 2);
+  packet->readData(TCP_START + 2, &port_msg, 2);
+  packet->readData(TCP_START + 4, &seq_num_msg, 4);
+  packet->readData(TCP_START + 8, &ack_num_msg, 4);
+	packet->readData(TCP_START + 12, &data_ofs, 1);
+	packet->readData(TCP_START + 13, &flag_msg, 1);
+  packet->readData(TCP_START + 16, &checksum, 2);
+
+
+  ihl = ihl & 15;
+  total_length = ntohs(total_length);
+  data_ofs = data_ofs >> 4;
+
+  local_ip = (in_addr_t) ntohl(ip_msg); local_port = (in_port_t)ntohs(port_msg);
+  remote_ip = (in_addr_t) ntohl(remote_ip_msg); remote_port = (in_port_t) ntohs(remote_port_msg);
 
   info->local_addr = unit_addr(local_ip, local_port);
-
-  packet->readData(TCP_START + 4, &seq_num_msg, 4);
+  info->remote_addr = unit_addr(remote_ip, remote_port);
   info->seq_num = ntohl(seq_num_msg);
-
-	packet->readData(TCP_START + 8, &ack_num_msg, 4);
 	info->ack_num = ntohl(ack_num_msg);
-
-	packet->readData(TCP_START + 12, &header_length_msg, 1);
-  info->header_length = header_length_msg;
-
-	packet->readData(TCP_START + 13, &flag_msg, 1);
+  info->ihl = ihl;
+  info->total_length = total_length;
+  info->data_ofs = data_ofs;
   info->flag = flag_msg;
+  info->checksum = ntohs(checksum);
 
   return;
 }
 
-void TCPAssignment::write_packet_response(Packet *new_packet,
-  size_t ip_start, size_t tcp_start,
-  uint8_t new_flag, uint32_t new_seq_num, uint32_t new_ack_num,
-  in_addr_t local_ip, in_addr_t remote_ip)
+void TCPAssignment::write_packet_header(Packet *new_packet, DataInfo *info)
 {
-  uint8_t tcp_data[DATA_OFS];
-	uint16_t checksum;
+  uint32_t ip_msg, remote_ip_msg, seq_num, ack_num;
+	uint16_t port_msg, remote_port_msg, checksum, checksum_converted;
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t tcp_header[DATA_OFS];
+  uint8_t data_ofs = 5 << 4;
+	uint16_t window = htons(51200);
 
-  new_packet->writeData(tcp_start + 4, &new_seq_num, 4);
-  new_packet->writeData(tcp_start + 8, &new_ack_num, 4);
-  new_packet->writeData(tcp_start + 13, &new_flag, 1);
+  std::tie(local_ip, local_port) = divide_addr(info->local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(info->remote_addr);
+  ip_msg = htonl(local_ip); port_msg = htons(local_port);
+  remote_ip_msg = htonl(remote_ip); remote_port_msg = htons(remote_port);
+  seq_num = htonl(info->seq_num); ack_num = htonl(info->ack_num);
 
-  new_packet->readData(tcp_start, tcp_data, DATA_OFS);
-  checksum = ~NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_data, DATA_OFS);
-  uint16_t checksum_converted = htons(checksum);
-  new_packet->writeData(tcp_start + 16, &checksum_converted, 2);
+  uint8_t ver_and_ihl = 4 << 4; // IPv4
+  ver_and_ihl += 5; // ihl = 5
+
+  new_packet->writeData(IP_START, &ver_and_ihl, 1);
+	new_packet->writeData(IP_START + 12, &ip_msg, 4);
+	new_packet->writeData(IP_START + 16, &remote_ip_msg, 4);
+
+	new_packet->writeData(TCP_START + 0, &port_msg, 2);
+	new_packet->writeData(TCP_START + 2, &remote_port_msg, 2);
+  new_packet->writeData(TCP_START + 4, &seq_num, 4);
+  new_packet->writeData(TCP_START + 8, &ack_num, 4);
+	new_packet->writeData(TCP_START + 12, &data_ofs, 1);
+  new_packet->writeData(TCP_START + 13, &(info->flag), 1);
+	new_packet->writeData(TCP_START + 14, &window, 2);
+
+  // Checksum Calculation
+  new_packet->readData(TCP_START, tcp_header, DATA_OFS);
+  checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_header, DATA_OFS);
+  checksum_converted = htons(checksum);
+  new_packet->writeData(TCP_START + 16, &checksum_converted, 2);
 
   return;
 }
 
-void TCPAssignment::write_packet_header(Packet *new_packet,
+void TCPAssignment::write_packet_header_without_checksum(Packet *new_packet, DataInfo *info)
+{
+  uint32_t ip_msg, remote_ip_msg, seq_num, ack_num;
+	uint16_t port_msg, remote_port_msg, checksum, checksum_converted;
+  in_addr_t local_ip, remote_ip;
+  in_port_t local_port, remote_port;
+  uint8_t tcp_header[DATA_OFS];
+  uint8_t data_ofs = 5 << 4;
+	uint16_t window = htons(51200);
+
+  std::tie(local_ip, local_port) = divide_addr(info->local_addr);
+  std::tie(remote_ip, remote_port) = divide_addr(info->remote_addr);
+  ip_msg = htonl(local_ip); port_msg = htons(local_port);
+  remote_ip_msg = htonl(remote_ip); remote_port_msg = htons(remote_port);
+  seq_num = htonl(info->seq_num); ack_num = htonl(info->ack_num);
+
+  uint8_t ver_and_ihl = 4 << 4; // IPv4
+  ver_and_ihl += 5; // ihl = 5
+
+  new_packet->writeData(IP_START, &ver_and_ihl, 1);
+	new_packet->writeData(IP_START + 12, &ip_msg, 4);
+	new_packet->writeData(IP_START + 16, &remote_ip_msg, 4);
+
+	new_packet->writeData(TCP_START + 0, &port_msg, 2);
+	new_packet->writeData(TCP_START + 2, &remote_port_msg, 2);
+  new_packet->writeData(TCP_START + 4, &seq_num, 4);
+  new_packet->writeData(TCP_START + 8, &ack_num, 4);
+	new_packet->writeData(TCP_START + 12, &data_ofs, 1);
+  new_packet->writeData(TCP_START + 13, &(info->flag), 1);
+	new_packet->writeData(TCP_START + 14, &window, 2);
+
+  return;
+}
+
+void TCPAssignment::write_packet_header_mod(Packet *new_packet,
   size_t ip_start, size_t tcp_start,
   in_addr_t local_ip, in_addr_t remote_ip,
   in_port_t local_port, in_port_t remote_port)
 {
+  uint8_t ver_and_ihl = 4 << 4; // IPv4
+  ver_and_ihl += 5; // ihl = 5
+  new_packet->writeData(IP_START, &ver_and_ihl, 1);
+
   uint32_t ip_msg;
 	uint16_t port_msg;
   ip_msg = htonl(local_ip);
@@ -1000,74 +1717,13 @@ void TCPAssignment::write_packet_header(Packet *new_packet,
 	new_packet->writeData(tcp_start + 2, &port_msg, 2);
 
   // Can new_data_ofs_ns and window_size change?
-	uint8_t data_ofs = DATA_OFS;
-	uint16_t window = htons(51200);
+	uint8_t data_ofs = 5 << 4;
+	uint16_t window = htons(WINDOW_SIZE);
 	new_packet->writeData(tcp_start + 12, &data_ofs, 1);
 	new_packet->writeData(tcp_start + 14, &window, 2);
 
   return;
 }
-
-void TCPAssignment::write_packet_header_mod(Packet *new_packet, DataInfo *info)
-{
-  uint32_t ip_msg;
-	uint16_t port_msg;
-
-  in_addr_t local_ip, remote_ip;
-  in_port_t local_port, remote_port;
-
-  std::tie(local_ip, local_port) = divide_addr(info->local_addr);
-  std::tie(remote_ip, remote_port) = divide_addr(info->remote_addr);
-
-  ip_msg = htonl(local_ip);
-	new_packet->writeData(IP_START + 12, &ip_msg, 4);
-	ip_msg = htonl(remote_ip);
-	new_packet->writeData(IP_START + 16, &ip_msg, 4);
-
-	port_msg = htons(local_port);
-	new_packet->writeData(TCP_START + 0, &port_msg, 2);
-	port_msg = htons(remote_port);
-	new_packet->writeData(TCP_START + 2, &port_msg, 2);
-
-	uint8_t header_length = 80;
-	uint16_t window = htons(51200);
-	new_packet->writeData(TCP_START + 12, &header_length, 1);
-	new_packet->writeData(TCP_START + 14, &window, 2);
-
-  return;
-}
-
-void TCPAssignment::write_packet_response_mod(Packet *new_packet, DataInfo *send_info, DataInfo *received_info)
-{
-  uint8_t tcp_data[DATA_OFS];
-	uint16_t checksum;
-  uint32_t seq_num, ack_num;
-
-  seq_num = htonl(send_info->seq_num);
-  ack_num = htonl(send_info->ack_num);
-
-  new_packet->writeData(TCP_START + 4, &seq_num, 4);
-  new_packet->writeData(TCP_START + 8, &ack_num, 4);
-  new_packet->writeData(TCP_START + 13, &(send_info->flag), 1);
-
-  new_packet->readData(TCP_START, tcp_data, DATA_OFS);
-
-  in_addr_t local_ip, remote_ip;
-  in_port_t local_port, remote_port;
-
-  std::tie(local_ip, local_port) = divide_addr(send_info->local_addr);
-  std::tie(remote_ip, remote_port) = divide_addr(send_info->remote_addr);
-
-  local_ip = htonl(local_ip);
-  remote_ip = htonl(remote_ip);
-
-  checksum = ~ NetworkUtil::tcp_sum(local_ip, remote_ip, tcp_data, DATA_OFS);
-  uint16_t checksum_converted = htons(checksum);
-  new_packet->writeData(TCP_START + 16, &checksum_converted, 2);
-
-  return;
-}
-
 
 
 } // namespace E

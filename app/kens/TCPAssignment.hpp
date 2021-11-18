@@ -26,7 +26,8 @@ namespace E {
     LISTEN_STATE,
     SYN_RCVD_STATE,
     SYN_SENT_STATE,
-    ESTAB_STATE
+    ESTAB_STATE,
+    FIN_STATE
   };
 
   typedef struct _DataInfo
@@ -86,6 +87,7 @@ namespace E {
     bool enough_send_space;
     uint32_t seq_num;
     uint32_t ack_num;
+    uint32_t retransmit_ack;
 
     /* For Timer Implementation */
     UUID timerUUID;

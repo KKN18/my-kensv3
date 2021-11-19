@@ -140,6 +140,11 @@ protected:
         }
         if (buffer_size - remaining > 0) {
           for (int j = 0; j < buffer_size - remaining; j++) {
+            if (send_buffer[j] != recv_buffer[j]){
+              printf("Different at j=%d\n", j);
+              break;
+            }
+            else printf("Same at j=%d\n", j);
             EXPECT_EQ(send_buffer[j], recv_buffer[j]);
           }
         }

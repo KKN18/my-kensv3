@@ -13,9 +13,9 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define FUNCTION_LOG 0
+#define FUNCTION_LOG 1
 #define STATE_LOG 0
-#define LOG 0
+#define LOG 1
 #define OLD_LOG 1
 #define IP_START 14
 #define TCP_START 34
@@ -99,6 +99,11 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
   default:
     assert(0);
   }
+}
+
+void TCPAssignment::update_socket_timer(Socket *socket)
+{
+  return;
 }
 
 void TCPAssignment::calculate_timeout_interval(Socket *socket, Time sample_rtt) {
@@ -228,6 +233,7 @@ void TCPAssignment::timerCallback(std::any payload) {
 
   Socket &s = sockets[{timer_info.pid, timer_info.fd}];
   s.timerUUID = this->addTimer(timer_info, timer_info.timeout_interval);
+  s.sent_time = getCurrentTime();
   return;
 }
 
@@ -277,114 +283,16 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
 
   size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
   size_t prev_count = count;
-  // (1) If there is enough space in the corresponding TCP socket’s send buffer for the data, the data is copied to the send buffer.
+
   if(s.send_remaining >= count)
   {
-    // (a) if the data is sendable (i.e., the data lies in the sender’s window, send the data and the call returns.
     if(s.send_ptr + count - s.acked_ptr < s.window)
     {
-      memcpy(s.send_ptr, buf, count);
-
-      while(count > 0)
-      {
-        // Write Header
-        DataInfo info;
-        info.local_addr = s.local_addr;
-        info.remote_addr = s.remote_addr;
-        if (s.send_ptr == s.send_buffer) {
-          info.seq_num = s.seq_num;
-        }
-        else {
-          info.seq_num = s.seq_num + write_byte;
-          s.seq_num += write_byte;
-        }
-
-        info.ack_num = s.ack_num + 1;
-        info.flag = ACK;
-
-        Packet packet(HEADER_SIZE + write_byte);
-        write_packet_header_without_checksum(&packet, &info);
-
-        // Send Buffer is Full
-        if(s.send_ptr + write_byte - s.send_buffer > SEND_BUFFER_SIZE)
-        {
-          this->returnSystemCall(syscallUUID, -1);
-          return;
-        }
-
-        // Write total_length and payload
-        uint16_t size = write_byte + 4 * (5 + 5);
-        uint8_t total_length = size >> 8;
-        packet.writeData(IP_START + 2, &total_length, 1);
-        total_length = (uint8_t)(size & 0xFF);
-        packet.writeData(IP_START + 3, &total_length, 1);
-        packet.writeData(TCP_START + 20, s.send_ptr, write_byte);
-
-        uint8_t tcp_data[DATA_OFS + write_byte];
-        uint16_t checksum;
-        uint32_t ip_msg, remote_ip_msg;
-        in_addr_t local_ip, remote_ip;
-        in_port_t local_port, remote_port;
-
-        std::tie(local_ip, local_port) = divide_addr(s.local_addr);
-        std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
-
-        ip_msg = htonl(local_ip);
-        remote_ip_msg = htonl(remote_ip);
-
-        packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
-        checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
-        checksum = htons(checksum);
-        packet.writeData(TCP_START + 16, &checksum, 2);
-
-        sendPacket("IPv4", std::move(packet));
-        // Call Timer
-        Packet clone_packet = packet.clone();
-        sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
-        s.inflight_packets_info->push_back({info.seq_num, info.ack_num});
-
-        if (!s.timer_alive) {
-          Timer_PayLoad_Info timer_info;
-          timer_info.seq_num = info.seq_num;
-          timer_info.ack_num = info.ack_num;
-          timer_info.timeout_interval = s.timeout_interval;
-          timer_info.pid = pid;
-          timer_info.fd = fd;
-          UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
-          s.timerUUID = timerUUID;
-          s.timer_alive = true;
-          s.timer_seq_num = info.seq_num + write_byte;
-          s.sent_time = getCurrentTime();
-        }
-
-        if(OLD_LOG)
-        {
-          printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
-        }
-
-        s.seqnumQueue->push({info.seq_num + write_byte, write_byte});
-
-        s.send_ptr += write_byte;
-        s.send_remaining -= write_byte;
-        count -= write_byte;
-        write_byte = write_byte > count ? count : write_byte;
-
-        // For Debugging
-        // DataInfo send_info;
-        // read_packet_header(&packet, &send_info);
-        // printf("ack_num: %d\n", send_info.ack_num);
-        // printf("seq_num: %d\n", send_info.seq_num);
-        // printf("flag: %d\n", send_info.flag);
-        // printf("total_length: %d\n", send_info.total_length);
-      }
-
-      this->returnSystemCall(syscallUUID, prev_count);
+      do_syscall_write(syscallUUID, pid, fd, buf, count);
       return;
     }
-    // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
     else
     {
-      // this->returnSystemCall(syscallUUID, 0);
       WriteProcess p;
       p.fd = fd;
       p.buf = buf;
@@ -394,8 +302,6 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
       return;
     }
   }
-  // (2) If there is not enough space, the call blocks until the TCP layer receives ACK(s) and  releases sufficient space for the data.
-  // When sufficient space for the given (from application) data becomes available, the data is copied to the send buffer
   else
   {
     WriteProcess p;
@@ -409,6 +315,108 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int fd, const void 
 
   // Not Reached
   assert(0);
+}
+
+void TCPAssignment::do_syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count)
+{
+  if(FUNCTION_LOG) {
+    printf("do_syscall_write\n");
+  }
+
+  Socket &s = sockets[{pid, fd}];
+
+  size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
+  size_t prev_count = count;
+
+  memcpy(s.send_ptr, buf, count);
+
+  while(count > 0)
+  {
+    // Write Header
+    DataInfo info;
+    info.local_addr = s.local_addr;
+    info.remote_addr = s.remote_addr;
+    if (s.send_ptr == s.send_buffer) {
+      info.seq_num = s.seq_num;
+    }
+    else {
+      info.seq_num = s.seq_num + write_byte;
+      s.seq_num += write_byte;
+    }
+
+    info.ack_num = s.ack_num + 1;
+    info.flag = ACK;
+
+    Packet packet(HEADER_SIZE + write_byte);
+    write_packet_header_without_checksum(&packet, &info);
+
+    // Send Buffer is Full
+    if(s.send_ptr + write_byte - s.send_buffer > SEND_BUFFER_SIZE)
+    {
+      this->returnSystemCall(syscallUUID, -1);
+      return;
+    }
+
+    // Write total_length and payload
+    uint16_t size = write_byte + 4 * (5 + 5);
+    uint8_t total_length = size >> 8;
+    packet.writeData(IP_START + 2, &total_length, 1);
+    total_length = (uint8_t)(size & 0xFF);
+    packet.writeData(IP_START + 3, &total_length, 1);
+    packet.writeData(TCP_START + 20, s.send_ptr, write_byte);
+
+    uint8_t tcp_data[DATA_OFS + write_byte];
+    uint16_t checksum;
+    uint32_t ip_msg, remote_ip_msg;
+    in_addr_t local_ip, remote_ip;
+    in_port_t local_port, remote_port;
+
+    std::tie(local_ip, local_port) = divide_addr(s.local_addr);
+    std::tie(remote_ip, remote_port) = divide_addr(s.remote_addr);
+
+    ip_msg = htonl(local_ip);
+    remote_ip_msg = htonl(remote_ip);
+
+    packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
+    checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
+    checksum = htons(checksum);
+    packet.writeData(TCP_START + 16, &checksum, 2);
+
+    sendPacket("IPv4", std::move(packet));
+    // Call Timer
+    Packet clone_packet = packet.clone();
+    sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
+    s.inflight_packets_info->push_back({info.seq_num, info.ack_num});
+
+    if (!s.timer_alive) {
+      Timer_PayLoad_Info timer_info;
+      timer_info.seq_num = info.seq_num;
+      timer_info.ack_num = info.ack_num;
+      timer_info.timeout_interval = s.timeout_interval;
+      timer_info.pid = pid;
+      timer_info.fd = fd;
+      UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
+      s.timerUUID = timerUUID;
+      s.timer_alive = true;
+      s.timer_seq_num = info.seq_num + write_byte;
+      s.sent_time = getCurrentTime();
+    }
+
+    if(OLD_LOG)
+    {
+      printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
+    }
+
+    s.seqnumQueue->push({info.seq_num + write_byte, write_byte});
+
+    s.send_ptr += write_byte;
+    s.send_remaining -= write_byte;
+    count -= write_byte;
+    write_byte = write_byte > count ? count : write_byte;
+  }
+
+  this->returnSystemCall(syscallUUID, prev_count);
+  return;
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol)
@@ -437,7 +445,6 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
   s.data_ptr = s.receive_buffer;
   s.remaining = 0;
   s.is_connected = false;
-  // Fixed window size
   s.window = WINDOW_SIZE;
   s.seq_num = 1;
   s.send_ptr = s.send_buffer;
@@ -485,6 +492,9 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
     // No need for using buf and count
     blocked_close_table[{pid, fd}] = p;
 
+    auto iter = s.inflight_packets_info->end();
+    iter--;
+    printf("Last element of inflight_packets is %d\n", iter->first);
     return;
   }
 
@@ -495,10 +505,8 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
     estab_pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(remote_ip, remote_port));
   }
 
-
   pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
 
-  // Free malloced memory in syscall_socket
   free(s.receive_buffer);
   free(s.send_buffer);
 
@@ -615,8 +623,11 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
   timer_info.pid = pid;
   timer_info.fd = sockfd;
   UUID timerUUID = this->addTimer(timer_info, s.timeout_interval);
+  s.timer_alive = true;
   s.timerUUID = timerUUID;
   s.state = SYN_SENT_STATE;
+  s.sent_time = getCurrentTime();
+
   return;
 }
 
@@ -679,33 +690,11 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
   std::tie(local_ip, local_port) = divide_addr(info.local_addr);
   std::tie(remote_ip, remote_port) = divide_addr(info.remote_addr);
 
-  new_socket.isBound = true;
-  new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
-  new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
-  new_socket.is_rcvd_data = false;
-  new_socket.packet_ptr = new_socket.receive_buffer;
-  new_socket.data_ptr = new_socket.receive_buffer;
-  new_socket.remaining = 0;
-  new_socket.window = WINDOW_SIZE;
-  new_socket.seq_num = 1;
-  new_socket.send_ptr = new_socket.send_buffer;
-  new_socket.acked_ptr = new_socket.send_buffer;
+  initialize_socket(&new_socket);
+
   new_socket.local_addr = info.local_addr;
   new_socket.remote_addr = info.remote_addr;
-  new_socket.is_connected = true;
-  new_socket.send_remaining = SEND_BUFFER_SIZE;
-  new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
-  new_socket.estimated_rtt = 100 * MS_TO_NS;
-  new_socket.timeout_interval = 100 * MS_TO_NS;
-  new_socket.dev_rtt = 0;
-  new_socket.sent_time = 0;
   new_socket.expect_ack_num = info.seq_num;
-  new_socket.timer_alive = false;
-  new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
-  new_socket.sent_time = 0;
-  new_socket.timer_seq_num = 0;
-  new_socket.retransmit_ack = 0;
-
 
   *addr = info.local_addr;
   *addrlen = sizeof(*addr);
@@ -909,6 +898,10 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
 
     if(flag & ACK) {
       this->cancelTimer(socket->timerUUID);
+      socket->timer_alive = false;
+      Time current_time = getCurrentTime();
+      Time sample_rtt = current_time - socket->sent_time;
+      calculate_timeout_interval(socket, sample_rtt);
 
       Timer_PayLoad_Info timer_info;
       timer_info.seq_num = info.seq_num;
@@ -975,6 +968,7 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     return;
   }
   this->cancelTimer(socket->timerUUID);
+  socket->timer_alive = false;
   Time sample_rtt = getCurrentTime() - socket->sent_time;
   calculate_timeout_interval(socket, sample_rtt);
   printf("Canceled timer pid %d\n", socket->pid);
@@ -1016,35 +1010,13 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
     std::tie(local_ip, local_port) = divide_addr(info.local_addr);
     std::tie(remote_ip,remote_port) = divide_addr(info.remote_addr);
 
-    new_socket.isBound = true;
-    new_socket.state = ESTAB_STATE;
-    new_socket.receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
-    new_socket.send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
-    new_socket.is_rcvd_data = false;
-    new_socket.data_ptr = new_socket.receive_buffer;
-    new_socket.packet_ptr = new_socket.receive_buffer;
-    new_socket.remaining = 0;
-    new_socket.window = 51200;
+    initialize_socket(&new_socket);
+
     new_socket.seq_num = ack_num;
     new_socket.ack_num = seq_num + 1;
-    new_socket.send_ptr = new_socket.send_buffer;
-    new_socket.acked_ptr = new_socket.send_buffer;
     new_socket.local_addr = info.local_addr;
     new_socket.remote_addr = info.remote_addr;
-    new_socket.is_connected = true;
-    new_socket.send_remaining = SEND_BUFFER_SIZE;
-    new_socket.seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
-    new_socket.estimated_rtt = 100 * MS_TO_NS;
-    new_socket.timeout_interval = 100 * MS_TO_NS;
-    new_socket.dev_rtt = 0;
-    new_socket.sent_time = 0;
     new_socket.expect_ack_num = seq_num;
-    new_socket.timer_alive;
-    new_socket.inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
-    new_socket.sent_time = 0;
-    new_socket.timer_seq_num = 0;
-    new_socket.retransmit_ack = 0;
-
 
     *process.addr = info.local_addr;
     *process.addrlen = sizeof(info.local_addr);
@@ -1084,7 +1056,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   }
   DataInfo received_info;
   read_packet_header(packet, &received_info);
-  this->cancelTimer(socket->timerUUID);
 
   in_addr_t local_ip, remote_ip;
   in_port_t local_port, remote_port;
@@ -1107,6 +1078,11 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
   // Handle data packet
   if(data_length != 0)
   {
+    this->cancelTimer(socket->timerUUID);
+    socket->timer_alive = false;
+    Time current_time = getCurrentTime();
+    Time sample_rtt = current_time - socket->sent_time;
+    calculate_timeout_interval(socket, sample_rtt);
     // Fast retransmit
     if(seq_num != socket->expect_ack_num)
     {
@@ -1203,30 +1179,14 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
     int diff = ack_num - target.first;
 
-    if(socket->timer_seq_num == ack_num)
-    {
-      // TIMER UPDATE
-      Time current_time = getCurrentTime();
-      Time sample_rtt = current_time - socket->sent_time;
-      calculate_timeout_interval(socket, sample_rtt);
-      printf("socket timeout_interval %d\n", socket->timeout_interval);
-    }
-    // printf("target.first %u ack_num %u\n", target.first, ack_num);
-
     if(target.first > ack_num)
     {
-      // printf("Start Retransmission: target.first %d ack_num %d\n", target.first, ack_num);
-      // Send all pakcets in inflight_packets_info
       if(socket->retransmit_ack == ack_num)
       {
         return;
       }
 
       socket->retransmit_ack = ack_num;
-
-      // Cancel Timer
-      this->cancelTimer(socket->timerUUID);
-      socket->timer_alive = false;
 
       auto iter = socket->inflight_packets_info->begin();
 
@@ -1244,21 +1204,38 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         sendPacket("IPv4", std::move(packet));
       }
 
-      Timer_PayLoad_Info timer_info;
-      timer_info.seq_num = first_seq_num;
-      timer_info.ack_num = first_ack_num;
-      timer_info.timeout_interval = socket->timeout_interval;
-      timer_info.pid = socket->pid;
-      timer_info.fd = socket->fd;
-      UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
-      socket->timerUUID = timerUUID;
-      socket->timer_alive = true;
+      this->cancelTimer(socket->timerUUID);
+      // Time current_time = getCurrentTime();
+      // Time sample_rtt = current_time - socket->sent_time;
+      // calculate_timeout_interval(socket, sample_rtt);
+
+      // Timer_PayLoad_Info timer_info;
+      // timer_info.seq_num = first_seq_num;
+      // timer_info.ack_num = first_ack_num;
+      // timer_info.timeout_interval = socket->timeout_interval;
+      // timer_info.pid = socket->pid;
+      // timer_info.fd = socket->fd;
+      // UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
+      // socket->timerUUID = timerUUID;
+      // socket->timer_alive = true;
+      // socket->sent_time = getCurrentTime();
       return;
     }
 
+    if(socket->timer_seq_num == ack_num)
+    {
+      // TIMER UPDATE
+      this->cancelTimer(socket->timerUUID);
+      socket->timer_alive = false;
+      Time current_time = getCurrentTime();
+      Time sample_rtt = current_time - socket->sent_time;
+      calculate_timeout_interval(socket, sample_rtt);
+      printf("socket timeout_interval %d\n", socket->timeout_interval);
+    }
+
     // Cancel Timer
-    this->cancelTimer(socket->timerUUID);
-    socket->timer_alive = false;
+    // this->cancelTimer(socket->timerUUID);
+    // socket->timer_alive = false;
 
     assert(diff >= 0);
     socket->acked_ptr += (diff + target.second);
@@ -1273,19 +1250,13 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       if(socket->inflight_packets_info->empty())
         break;
     }
-    // printf("inflight_packets_info front ack %d, ack_num %d\n", socket->inflight_packets_info->front().first, ack_num);
-    // printf("inflight_packets_info.size: %d\n", socket->inflight_packets_info->size());
 
     auto biter = blocked_close_table.find({socket->pid, socket->fd});
-
     if (biter != blocked_close_table.end())
     {
       if(socket->inflight_packets_info->empty())
       {
         auto &p = biter->second;
-
-        // Remaining syscall_close procedure
-        // For cases where s.remote_addr is uninitialized
         if(socket->is_connected)
         {
           std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
@@ -1293,9 +1264,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         }
 
         pid_sockfd_by_ip_port.erase(std::pair<in_addr_t, in_port_t>(local_ip, local_port));
-
-        // Free malloced memory in syscall_socket
-        // delete queues and lists
 
         if(LOG)
           printf("Possible Segmentation Fault\n");
@@ -1307,13 +1275,8 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
       	this->removeFileDescriptor(socket->pid, socket->fd);
       	this->returnSystemCall(p.syscallUUID, 0);
-        return;
       }
-      else
-      {
-        // Writing is Done. Only Receiving ACK is enough.
-        return;
-      }
+      return;
     }
 
     auto iter = blocked_write_table.find({socket->pid, socket->fd});
@@ -1322,207 +1285,17 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       auto &p = iter->second;
       if(socket->acked_ptr == socket->send_ptr)
       {
-        if (socket->remaining >= p.count) assert(0);
-
         socket->send_ptr = socket->send_buffer;
         socket->acked_ptr = socket->send_buffer;
-
         size_t count = p.count;
-        size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
-        size_t prev_count = count;
         const void *buf = p.buf;
-
-        if(socket->send_ptr + count - socket->acked_ptr < socket->window)
-        {
-          memcpy(socket->send_ptr, buf, count);
-
-          while(count > 0)
-          {
-            // Write Header
-            DataInfo info;
-            info.local_addr = socket->local_addr;
-            info.remote_addr = socket->remote_addr;
-            if (socket->send_ptr == socket->send_buffer) {
-              info.seq_num = socket->seq_num;
-            }
-            else {
-              info.seq_num = socket->seq_num + write_byte;
-              socket->seq_num += write_byte;
-            }
-
-            info.ack_num = socket->ack_num + 1;
-            info.flag = ACK;
-
-            Packet packet(HEADER_SIZE + write_byte);
-            write_packet_header_without_checksum(&packet, &info);
-
-            // Send Buffer is Full
-            if(socket->send_ptr + write_byte - socket->send_buffer > SEND_BUFFER_SIZE)
-            {
-              this->returnSystemCall(p.syscallUUID, -1);
-              return;
-            }
-
-            // Write total_length and payload
-            uint16_t size = write_byte + 4 * (5 + 5);
-            uint8_t total_length = size >> 8;
-            packet.writeData(IP_START + 2, &total_length, 1);
-            total_length = (uint8_t)(size & 0xFF);
-            packet.writeData(IP_START + 3, &total_length, 1);
-            packet.writeData(TCP_START + 20, socket->send_ptr, write_byte);
-
-            uint8_t tcp_data[DATA_OFS + write_byte];
-            uint16_t checksum;
-            uint32_t ip_msg, remote_ip_msg;
-            in_addr_t local_ip, remote_ip;
-            in_port_t local_port, remote_port;
-
-            std::tie(local_ip, local_port) = divide_addr(socket->local_addr);
-            std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
-
-            ip_msg = htonl(local_ip);
-            remote_ip_msg = htonl(remote_ip);
-
-            packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
-            checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
-            checksum = htons(checksum);
-            packet.writeData(TCP_START + 16, &checksum, 2);
-
-            sendPacket("IPv4", std::move(packet));
-
-            // Reset Timer
-            Packet clone_packet = packet.clone();
-            sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
-
-            socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
-
-            if (!socket->timer_alive) {
-              Timer_PayLoad_Info timer_info;
-              timer_info.seq_num = info.seq_num;
-              timer_info.ack_num = info.ack_num;
-              timer_info.timeout_interval = socket->timeout_interval;
-              timer_info.pid = socket->pid;
-              timer_info.fd = socket->fd;
-              UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
-              socket->timerUUID = timerUUID;
-              socket->timer_alive = true;
-              socket->sent_time = getCurrentTime();
-              socket->timer_seq_num = info.seq_num + write_byte;
-            }
-
-            if(OLD_LOG)
-              printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
-
-            socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
-            socket->send_ptr += write_byte;
-            socket->send_remaining -= write_byte;
-            count -= write_byte;
-            write_byte = write_byte > count ? count : write_byte;
-          }
-
-          this->returnSystemCall(p.syscallUUID, prev_count);
-          return;
-        }
-        // (b) if the data is not sendable (i.e., the data lies outside the sender’s window), the call just returns.
-        else
-        {
-          assert(0);
-        }
-        this->returnSystemCall(p.syscallUUID, -1);
+        do_syscall_write(p.syscallUUID, socket->pid, socket->fd, buf, count);
       }
       else if(socket->send_ptr + p.count - socket->acked_ptr < socket->window)
       {
         size_t count = p.count;
-        size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
-        size_t prev_count = count;
         const void *buf = p.buf;
-
-        memcpy(socket->send_ptr, buf, count);
-
-        while(count > 0)
-        {
-          // Write Header
-          DataInfo info;
-          info.local_addr = socket->local_addr;
-          info.remote_addr = socket->remote_addr;
-          if (socket->send_ptr == socket->send_buffer) {
-            info.seq_num = socket->seq_num;
-          }
-          else {
-            info.seq_num = socket->seq_num + write_byte;
-            socket->seq_num += write_byte;
-          }
-
-          info.ack_num = socket->ack_num + 1;
-          info.flag = ACK;
-
-          Packet packet(HEADER_SIZE + write_byte);
-          write_packet_header_without_checksum(&packet, &info);
-
-          // Send Buffer is Full
-          if(socket->send_ptr + write_byte - socket->send_buffer > SEND_BUFFER_SIZE)
-          {
-            this->returnSystemCall(p.syscallUUID, -1);
-            return;
-          }
-
-          // Write total_length and payload
-          uint16_t size = write_byte + 4 * (5 + 5);
-          uint8_t total_length = size >> 8;
-          packet.writeData(IP_START + 2, &total_length, 1);
-          total_length = (uint8_t)(size & 0xFF);
-          packet.writeData(IP_START + 3, &total_length, 1);
-          packet.writeData(TCP_START + 20, socket->send_ptr, write_byte);
-
-          uint8_t tcp_data[DATA_OFS + write_byte];
-          uint16_t checksum;
-          uint32_t ip_msg, remote_ip_msg;
-          in_addr_t local_ip, remote_ip;
-          in_port_t local_port, remote_port;
-
-          std::tie(local_ip, local_port) = divide_addr(socket->local_addr);
-          std::tie(remote_ip, remote_port) = divide_addr(socket->remote_addr);
-
-          ip_msg = htonl(local_ip);
-          remote_ip_msg = htonl(remote_ip);
-
-          packet.readData(TCP_START, tcp_data, DATA_OFS + write_byte);
-          checksum = ~ NetworkUtil::tcp_sum(ip_msg, remote_ip_msg, tcp_data, DATA_OFS + write_byte);
-          checksum = htons(checksum);
-          packet.writeData(TCP_START + 16, &checksum, 2);
-
-          sendPacket("IPv4", std::move(packet));
-
-          // Reset Timer
-          Packet clone_packet = packet.clone();
-          sent_packets.insert({{info.seq_num, info.ack_num}, clone_packet});
-
-          socket->inflight_packets_info->push_back({info.seq_num, info.ack_num});
-
-          if (!socket->timer_alive) {
-            Timer_PayLoad_Info timer_info;
-            timer_info.seq_num = seq_num;
-            timer_info.ack_num = ack_num;
-            timer_info.timeout_interval = socket->timeout_interval;
-            timer_info.pid = socket->pid;
-            timer_info.fd = socket->fd;
-            UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
-            socket->timerUUID = timerUUID;
-            socket->timer_alive = true;
-            socket->sent_time = getCurrentTime();
-            socket->timer_seq_num = info.seq_num + write_byte;
-          }
-
-          if(LOG)
-            printf("seqnumQueue push seq_num %d write_byte %d\n", info.seq_num + write_byte, write_byte);
-          socket->seqnumQueue->push({info.seq_num + write_byte, write_byte});
-
-          socket->send_ptr += write_byte;
-          socket->send_remaining -= write_byte;
-          count -= write_byte;
-          write_byte = write_byte > count ? count : write_byte;
-        }
-        this->returnSystemCall(p.syscallUUID, prev_count);
+        do_syscall_write(p.syscallUUID, socket->pid, socket->fd, buf, count);
       }
     }
   }
@@ -1537,6 +1310,36 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
 
 void TCPAssignment::manage_fin(Packet *packet, Socket *socket)
 {
+  return;
+}
+
+void TCPAssignment::initialize_socket(Socket *new_socket)
+{
+  new_socket->isBound = true;
+  new_socket->state = ESTAB_STATE;
+  new_socket->receive_buffer = (char *) malloc(RECEIVE_BUFFER_SIZE * sizeof(char));
+  new_socket->send_buffer = (char *) malloc(SEND_BUFFER_SIZE * sizeof(char));
+  new_socket->is_rcvd_data = false;
+  new_socket->packet_ptr = new_socket->receive_buffer;
+  new_socket->data_ptr = new_socket->receive_buffer;
+  new_socket->remaining = 0;
+  new_socket->window = WINDOW_SIZE;
+  new_socket->seq_num = 1;
+  new_socket->send_ptr = new_socket->send_buffer;
+  new_socket->acked_ptr = new_socket->send_buffer;
+  new_socket->is_connected = true;
+  new_socket->send_remaining = SEND_BUFFER_SIZE;
+  new_socket->seqnumQueue = new std::queue<std::pair<uint32_t, uint32_t>>;
+  new_socket->estimated_rtt = 100 * MS_TO_NS;
+  new_socket->timeout_interval = 100 * MS_TO_NS;
+  new_socket->dev_rtt = 0;
+  new_socket->sent_time = 0;
+  new_socket->timer_alive = false;
+  new_socket->inflight_packets_info = new std::list<std::pair<uint32_t, uint32_t>>;
+  new_socket->sent_time = 0;
+  new_socket->timer_seq_num = 0;
+  new_socket->retransmit_ack = 0;
+
   return;
 }
 

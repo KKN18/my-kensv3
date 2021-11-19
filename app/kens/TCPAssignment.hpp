@@ -182,7 +182,11 @@ public:
 
   /* System Calls */
   void syscall_read(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
+  // Helper function for syscall_read
+  // void do_syscall_write(UUID syscallUUID, int pid, int fd, void *buf, size_t count);
   void syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
+  // Helper function for syscall_write
+  void do_syscall_write(UUID syscallUUID, int pid, int fd, const void *buf, size_t count);
   void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
 	void syscall_close(UUID syscallUUID, int pid, int fd);
 	void syscall_bind(UUID syscallUUID, int pid,
@@ -208,6 +212,10 @@ public:
 
   /* Timer Calculation */
   void calculate_timeout_interval(Socket *socket, Time sample_rtt);
+  void update_socket_timer(Socket *socket);
+
+  /* Initialize Socket */
+  void initialize_socket(Socket *socket);
 
   /* Utility Functions For Packet Manipulation */
   // Generate or Read SockAddr

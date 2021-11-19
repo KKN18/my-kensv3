@@ -13,10 +13,10 @@
 #include <E/Networking/E_Packet.hpp>
 #include <cerrno>
 
-#define FUNCTION_LOG 1
+#define FUNCTION_LOG 0
 #define STATE_LOG 0
-#define LOG 1
-#define OLD_LOG 1
+#define LOG 0
+#define OLD_LOG 0
 #define IP_START 14
 #define TCP_START 34
 #define HEADER_SIZE 54
@@ -35,6 +35,8 @@
 #define ALPHA 0.125
 #define BETA 0.25
 #define MS_TO_NS 1000000 // 10^6
+
+int write_cnt = 0;
 
 namespace E {
 
@@ -323,6 +325,7 @@ void TCPAssignment::do_syscall_write(UUID syscallUUID, int pid, int fd, const vo
     printf("do_syscall_write\n");
   }
 
+
   Socket &s = sockets[{pid, fd}];
 
   size_t write_byte = count > MAX_DATALOAD ? MAX_DATALOAD : count;
@@ -332,17 +335,23 @@ void TCPAssignment::do_syscall_write(UUID syscallUUID, int pid, int fd, const vo
 
   while(count > 0)
   {
+    write_cnt += 1;
+    printf("Write cnt : %d\n", write_cnt);
     // Write Header
     DataInfo info;
     info.local_addr = s.local_addr;
     info.remote_addr = s.remote_addr;
-    if (s.send_ptr == s.send_buffer) {
-      info.seq_num = s.seq_num;
+    auto iter = blocked_write_table.find({s.pid, s.fd});
+    if (s.send_ptr == s.send_buffer && iter == blocked_write_table.end())
+    {
+        info.seq_num = s.seq_num;
     }
-    else {
+    else
+    {
       info.seq_num = s.seq_num + write_byte;
       s.seq_num += write_byte;
     }
+    printf("Write Seq_num %d count %d\n", s.seq_num, count);
 
     info.ack_num = s.ack_num + 1;
     info.flag = ACK;
@@ -494,7 +503,8 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int fd)
 
     auto iter = s.inflight_packets_info->end();
     iter--;
-    printf("Last element of inflight_packets is %d\n", iter->first);
+    if(LOG)
+      printf("Last element of inflight_packets is %d\n", iter->first);
     return;
   }
 
@@ -525,7 +535,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
   auto iter = sockets.find({pid, sockfd});
   if(iter == sockets.end()) {
-    printf("Cannot find connect socket\n");
     this->returnSystemCall(syscallUUID, -1);
   }
 
@@ -839,7 +848,8 @@ void TCPAssignment::manage_listen(Packet *packet, Socket *socket)
     timer_info.timeout_interval = socket->timeout_interval;
     timer_info.pid = socket->pid;
     timer_info.fd = socket->fd;
-    printf("ACCEPT timeout_interval %d pid %d\n", socket->timeout_interval/MS_TO_NS, socket->pid);
+    if(LOG)
+      printf("ACCEPT timeout_interval %d pid %d\n", socket->timeout_interval/MS_TO_NS, socket->pid);
     UUID timerUUID = this->addTimer(timer_info, socket->timeout_interval);
     socket->timerUUID = timerUUID;
     socket->timer_alive = true;
@@ -906,7 +916,8 @@ void TCPAssignment::manage_synsent(Packet *packet, Socket *socket)
       Timer_PayLoad_Info timer_info;
       timer_info.seq_num = info.seq_num;
       timer_info.ack_num = info.ack_num;
-      printf("SYNSENT timeout_interval %d\n", socket->timeout_interval/MS_TO_NS);
+      if(LOG)
+        printf("SYNSENT timeout_interval %d\n", socket->timeout_interval/MS_TO_NS);
       timer_info.timeout_interval = socket->timeout_interval;
       timer_info.pid = socket->pid;
       timer_info.fd = socket->fd;
@@ -958,23 +969,18 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
   std::tie(remote_ip, remote_port) = divide_addr(received_info.remote_addr);
 
   if(flag & SYN) {
-    printf("listenqueue size : %d, backlog : %d\n", socket->listenQueue->size() , socket->backlog);
     if (socket->listenQueue->size() + 1 < socket->backlog) {
       Packet clone_packet = *packet;
       socket->listenQueue->push(clone_packet);
-      printf("ListenQueue push\n");
     }
-    printf("And return\n");
     return;
   }
   this->cancelTimer(socket->timerUUID);
   socket->timer_alive = false;
   Time sample_rtt = getCurrentTime() - socket->sent_time;
   calculate_timeout_interval(socket, sample_rtt);
-  printf("Canceled timer pid %d\n", socket->pid);
   auto info_it = data_infos.find({socket->pid, socket->fd});
   if (info_it == data_infos.end()){
-    printf("Here1\n");
     return;
   }
 
@@ -989,12 +995,10 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
 
   if(temp_local_ip != local_ip || temp_remote_ip != remote_ip ||
     temp_local_port != local_port || temp_remote_port != remote_port) {
-      printf("Here2\n");
       return;
   }
 
   if(!(flag & ACK)) {
-    printf("Here3\n");
     return;
   }
 
@@ -1026,16 +1030,13 @@ void TCPAssignment::manage_synrcvd(Packet *packet, Socket *socket)
 
     this->returnSystemCall(process.syscallUUID, new_fd);
     blocked_process_table.erase(socket->pid);
-    printf("Accept right now\n");
   }
   else {
-    printf("Accept later\n");
     socket->acceptQueue->push(info);
   }
 
   socket->state = LISTEN_STATE;
   if(socket->listenQueue->empty()) {
-    printf("Here4\n");
     return;
   }
 
@@ -1230,7 +1231,6 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
       Time current_time = getCurrentTime();
       Time sample_rtt = current_time - socket->sent_time;
       calculate_timeout_interval(socket, sample_rtt);
-      printf("socket timeout_interval %d\n", socket->timeout_interval);
     }
 
     // Cancel Timer
@@ -1289,13 +1289,26 @@ void TCPAssignment::manage_estab(Packet *packet, Socket *socket)
         socket->acked_ptr = socket->send_buffer;
         size_t count = p.count;
         const void *buf = p.buf;
-        do_syscall_write(p.syscallUUID, socket->pid, socket->fd, buf, count);
+        if(socket->send_ptr + p.count - socket->acked_ptr < socket->window)
+        {
+          do_syscall_write(p.syscallUUID, socket->pid, socket->fd, p.buf, count);
+          blocked_write_table.erase({socket->pid, socket->fd});
+          return;
+        }
+        else
+        {
+          assert(0);
+          returnSystemCall(p.syscallUUID, -1);
+          return;
+        }
       }
       else if(socket->send_ptr + p.count - socket->acked_ptr < socket->window)
       {
         size_t count = p.count;
         const void *buf = p.buf;
-        do_syscall_write(p.syscallUUID, socket->pid, socket->fd, buf, count);
+        do_syscall_write(p.syscallUUID, socket->pid, socket->fd, p.buf, count);
+        blocked_write_table.erase({socket->pid, socket->fd});
+        return;
       }
     }
   }
